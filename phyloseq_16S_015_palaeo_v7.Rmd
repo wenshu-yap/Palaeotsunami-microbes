@@ -1,0 +1,3845 @@
+---
+title: "Microbial tsunami phyloseq analysis with 16S dataset"
+output:
+  html_document:
+    df_print: paged
+---
+
+# 1 Aim
+This is a R markdown to process 16S data generated using Fede universal primer, sequenced in Macrogen Miseq Illumina platform.  
+The raw sequences were processed in Fede ASE server using dada2 in R. The script used is script_dada2_silva_015.R  
+All the sequences are paired-end reads.
+
+after denoised - 7,961,131 number of sequences
+after merged and chimera removed - 4,979,509 number of sequences (average ~84,011)
+Max number of sequences - 70,169 (2007SMsand2015)
+Min number of sequences - 10,423 (Po2004sX2014)
+Average number of sequences - 84,011
+
+Total ASVs - 68,111
+Total samples number - 119
+
+
+Here I will only look at palaeotsunami samples in Phra Thong island, Thailand
+
+# 2 Load all necessary libraries
+
+```{r, echo=FALSE}
+# install.packages("dplyr")     # To manipulate dataframes
+# install.packages("readxl")    # To read Excel files into R
+
+# install.packages("ggplot2")   # for high quality graphics
+# install.packages("tibble")    # to work with data frames
+# install.packages("tidyr")     # to work with data frames
+# install.packages("reshape2")  # to tidy dataframe
+
+# install.packages("stringr")   # to manipulate strings
+# install.packages("stringi", dependencies = TRUE)   # to manipulate strings
+
+# install.packages("treemapify")
+# install.packages("viridis")
+# install.packages("ggpubr")   # to grid plot
+# install.packages("seriation") # to do seriation on heatmap
+# install.packages("corrplot")  # to make correlation plot
+
+# install.packages("stringi", dependencies=TRUE, INSTALL_opts = c('--no-lock'))
+
+# install.packages("stringr", dependencies=TRUE, INSTALL_opts = c('--no-lock'))
+
+# source("https://bioconductor.org/biocLite.R")
+# BiocManager::install(c("phyloseq","Biostrings"), force=TRUE)
+# phyloseq for metabarcode data analysis
+# Biostrings needed for fastq.geometry
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("DESeq2")
+```
+
+Note: I had problem to install stringi package after upgrading my Mac version and R and R studio version.
+The trick I did was xcode-select --install
+
+for phyloseq installation, follow this link: https://bioconductor.org/packages/release/bioc/html/phyloseq.html
+
+```{r}
+library("BiocManager")
+library("phyloseq")
+library("ggplot2")      # graphics
+library("readxl")       # necessary to import the data from Excel file
+library("dplyr")        # filter and reformat data frames
+library("ggpubr")
+library("ggrepel")      # create text and label geom that don't overlap
+library("stringr")
+library("tibble")
+library("tidyr")
+library("stats")
+library("seriation")
+library("reshape2")
+library("vegan")
+library("treemapify")
+library("viridis")      # load viridis color map
+
+```
+
+# 3 Phyloseq analysis
+
+## 3.1 Create phyloseq files
+
+Filter the data to remove the low bootsrtaps values (threshold:bootstrap >89% at the phylum level) and create a phyloseq file
+
+```{r}
+setwd("/Users/wenshu/Dropbox/India-DPM3a2/resequence/015/")
+  
+  otu_table_final <- read_excel("./phyloseq_palaeo/_dada2.xlsx", sheet = "_dada2")
+  otu_table_ps <- otu_table_final %>% filter(Phylum_boot >= 90)
+  
+  sample_table <- read_excel("./phyloseq_palaeo/sample_data_.xlsx", sheet = "sample_data_")
+  
+  otu_mat <- otu_table_ps %>% dplyr::select(-Genus, -Genus_boot)
+  tax_mat <- otu_table_ps %>% dplyr::select(otu = asv_code, Kingdom:Genus)
+  samples_df <- sample_table %>% dplyr::rename(sample = sample_names)
+
+  
+  #define the row name from the otu column
+  otu_mat <- otu_mat %>% 
+    remove_rownames() %>% #remove the existing rowname and replace with the value provided in next line
+    column_to_rownames(var="asv_code") %>% # set rowname as asv_code=otu
+    as.matrix() #transform into matrix for phyloseq
+  
+  class(otu_mat) <- "numeric" #abundance is expected to be numeric
+  
+  tax_mat <- tax_mat %>%
+    remove_rownames() %>% #remove the existing rowname and replace with the value provided in next line
+    column_to_rownames(var="otu") %>% # set rowname as asv_code/otu
+    as.matrix() #transform into matrix for phyloseq
+  
+  samples_df <- samples_df %>%
+    remove_rownames() %>% #remove the existing rowname and replace with the value provided in next line
+    column_to_rownames(var="sample") %>% #set rowname as "sample"
+    as.data.frame() #keep sample table as dataframe
+  
+# so now otu_mat and tax_mat have matching rownames to merge when creating phyloseq object
+  
+  #to count NA present in the data
+  #summary(otu_mat)
+  
+  #transform phyloseq objects
+  OTU = otu_table(otu_mat, taxa_are_rows = TRUE)
+  TAX = tax_table(tax_mat)
+  samples = sample_data(samples_df)
+  
+  ps_all_raw_ <- phyloseq(OTU, TAX, samples)
+  ps_all_raw_
+
+  
+```
+
+
+Extract Phra Thong samples only
+```{r}
+  ps_all_raw <- phyloseq::subset_samples(ps_all_raw_, Venue == "Phra Thong")
+   cat("\nPhyloseq All \n========== \n")
+  ps_all_raw
+```
+
+Remove singletone
+```{r}
+## remove any OTUs that have only 10 count throughout the entire dataset
+  ps_all_raw_rm1 <- prune_taxa(taxa_sums(ps_all_raw) > 10, ps_all_raw) 
+  cat("\nPhyloseq All - remove reads below 10 \n========== \n")
+  ps_all_raw_rm1
+```
+
+Remove sandsheetX and pre-sandsheetX
+```{r}
+ps_mod1 <- subset_samples(ps_all_raw_rm1, !(Description4 %in% c("Pre_uncertain_palaeotsunami", "Uncertain_Palaeotsunami")))
+ps_mod1
+```
+
+Remove storm samples from the dataset
+```{r}
+  ps_mod <- subset_samples(ps_mod1, !(SamplingSite == "storm"))
+  cat("\nPhyloseq - no storm \n========== \n")
+  ps_mod
+  
+```
+
+remove beach, intertidal and marine
+```{r}
+  ps_swales <- subset_samples(ps_mod, !(SampleType %in% c("Beach", "Intertidal", "Marine sediment")))
+  
+  # remove taxa that are absent
+  ps_swales <- prune_taxa(taxa_sums(ps_swales) > 0, ps_swales)
+  cat("\nPhyloseq Swales \n========== \n")
+  ps_swales
+```
+
+Visualize data
+
+```{r}
+  sample_names(ps_swales)
+```
+
+
+```{r}
+  rank_names(ps_swales)
+```
+
+
+```{r}
+ sample_variables(ps_swales)
+```
+
+
+Check if there is any dataset that have samples with no reads
+```{r}
+  sample_sums(ps_swales) >0
+```
+
+
+Embryophyta is terrestrial plant, it seems to dominate treemap.
+
+```{r}
+  ps_mod_euk <- subset_taxa(ps_swales, (Class %in% c("Embryophyta","Metazoa", "Mitochondria")))
+  ps_mod_euk
+```
+
+## 3.2 Separate the dataset
+```{r}
+# add new variable for plotting
+id <- phyloseq::get_variable(ps_swales) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID","Description4","Swale","Year") %>%
+    mutate_if(is.factor, as.character) %>%
+    unite (id, c(Description4,Swale,Year), sep = "_", remove = FALSE) %>%
+   dplyr::rename(sample = SampleID) %>%
+    remove_rownames() %>% #remove the existing rowname and replace with the value provided in next line
+    column_to_rownames(var="sample") %>% #set rowname as "sample"
+    as.data.frame()
+
+# turn into sample_data
+sam.new<- sample_data(id)
+head(sam.new)
+
+# merge with original phyloseq object
+ps_swales<- merge_phyloseq(ps_swales, sam.new)
+```
+
+
+
+swale X dataset
+```{r}
+  ps_mod_X <- subset_samples(ps_swales, Swale == "X")
+  ps_mod_X <- prune_taxa(taxa_sums(ps_mod_X) > 0, ps_mod_X)
+  cat("\nPhyloseq Swale X \n========== \n")
+  ps_mod_X
+```
+
+swale Y dataset
+```{r}
+  ps_mod_Y <- subset_samples(ps_swales, Swale == "Y")
+  ps_mod_Y <- prune_taxa(taxa_sums(ps_mod_Y) > 0, ps_mod_Y)
+  cat("\nPhyloseq Swale Y \n========== \n")
+  ps_mod_Y
+```
+
+## 3.3 Normalize number of reads in each samples using median sequencing depth.
+
+```{r}
+# First define a function to normalize
+
+ps_normalize_median <- function(ps, title) {
+    ps_median = median(sample_sums(ps))
+    cat(sprintf("\nThe median number of reads used for normalization of %s is  %.0f", 
+        title, ps_median))
+    normalize_median = function(x, t = ps_median) (if (sum(x) > 0) {
+        t * (x/sum(x))
+    } else {
+        x
+    })
+    ps = transform_sample_counts(ps, normalize_median)
+    cat(str_c("\nPhyloseq ", title, "\n========== \n"))
+    print(ps)
+}
+```
+
+```{r}
+ps_swales <- ps_normalize_median(ps_swales, "all")
+```
+
+```{r}
+ps_mod_X= ps_normalize_median(ps_mod_X, "Swale X")
+```
+
+```{r}
+ps_mod_Y= ps_normalize_median(ps_mod_Y, "Swale Y")
+```
+
+## 3.4 Create a list for the phyloseq files
+
+```{r}
+list_X_Y <- list(ps = c(ps_mod_X, ps_mod_Y), 
+                title = c("Swale X", "Swale Y"))
+
+list_swales <- list(ps = c(ps_swales, ps_mod_X, ps_mod_Y),
+                    title = c("all", "Swale X", "Swale Y"))
+
+```
+
+
+## 3.5 Create tabular files for other plots
+
+```{r}
+ps_to_long <- function(ps) {
+    otu_df <- data.frame(otu_table(ps),stringsAsFactors =FALSE) %>% rownames_to_column(var = "asv_code")
+    taxo_df <- data.frame(tax_table(ps),stringsAsFactors =FALSE) %>% rownames_to_column(var = "asv_code")
+    otu_df <- left_join(taxo_df, otu_df)
+    otu_df <- gather(otu_df, "sample", "n_seq", contains("X")) #All samples contain X
+    metadata_df <- data.frame(sample_data(ps), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+    otu_df <- left_join(otu_df, metadata_df)
+}
+
+# Swale samples
+long_all <- ps_to_long(ps_swales)
+saveRDS(long_all, file = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/long_all_swale.rds")
+
+# Swale X
+long_all_X <- ps_to_long(ps_mod_X)
+saveRDS(long_all_X, file = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/long_all_X.rds")
+
+# Swale Y
+long_all_Y <- ps_to_long(ps_mod_Y)
+saveRDS(long_all_Y, file="../phyloseq_palaeo/fig_swale_2_diff_col_v2/long_all_Y.rds")
+```
+
+```{r}
+saveRDS(ps_swales, file = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/ps_mod.rds")
+
+# reload files
+ps_swales<- readRDS(file = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/ps_mod.rds")
+long_all <- readRDS(file = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/long_all_swale.rds")
+#long_euk <- readRDS(file = "../phyloseq_palaeo/fig_swale/long_euk.rds")
+#long_bact <- readRDS(file = "../phyloseq_palaeo/fig_swale/long_bact.rds")
+#long_arch <- readRDS(file = "../phyloseq_palaeo/fig_swale/long_arch.rds")
+
+```
+
+# 4 Color palette
+```{r}
+# swales_col <- c("PostSandsheet A" = "#97B384", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#96C5B1",  "Sandsheet B"="#D0A338", "Pre_Sandsheet B"="#215807", "Sandsheet C"="#F2A86A", "Pre_Sandsheet C"="#B8C308", "Sandsheet D"="#F1E2D1", "Pre_Sandsheet D"="#1E4650")
+
+ swales_col <- c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033")
+
+
+  sample_col <- c("Soil and terrestrial samples" = "#97B384", "Tsunami deposit" = "#DEC447")
+  
+```
+
+```{r}
+#rearrange the order of the Description
+  order_description<- list("PostSandsheet A", "Sandsheet A",  "PreSandsheet A",  "Sandsheet B", "Pre_Sandsheet B", "Sandsheet C", "Pre_Sandsheet C", "Sandsheet D", "Pre_Sandsheet D")
+
+  ps_swales@sam_data$Description4 <- factor(ps_swales@sam_data$Description4, level=order_description)
+
+  ps_mod_X@sam_data$Description4 <- factor(ps_mod_X@sam_data$Description4, level=order_description)
+  
+  ps_mod_Y@sam_data$Description4 <- factor(ps_mod_Y@sam_data$Description4, level=order_description)
+```
+
+```{r}
+list_X_Y <- list(ps = c(ps_mod_X, ps_mod_Y), 
+                title = c("Swale X", "Swale Y"))
+
+list_swales <- list(ps = c(ps_swales, ps_mod_X, ps_mod_Y),
+                    title = c("all", "Swale X", "Swale Y"))
+```
+
+
+# 5 Data analysis
+## 5.1 Alpha diversity
+
+```{r}
+
+  plot_rich <- list()
+  mean_descp_shannon <- list()
+  df_shannon <- list()
+  richness <- list()
+    
+     for (i in 1:length(list_swales$ps)) {
+        
+         ps_richness <- list_swales$ps[[i]]
+        
+       #rearrange the order of the Description
+        order_description_rev<- list("Pre_Sandsheet D","Sandsheet D",
+                                     "Pre_Sandsheet C", "Sandsheet C",
+                                     "Pre_Sandsheet B", "Sandsheet B",
+                                     "PreSandsheet A", "Sandsheet A",
+                                     "PostSandsheet A")
+
+        ps_richness@sam_data$Description4 <- factor(ps_richness@sam_data$Description4, level=order_description_rev)
+
+        
+        #calculate rarefaction
+       plot_rich[[i]]<- plot_richness(ps_richness, x="Description4", measures=c("Shannon")) 
+       
+       df_shannon[[i]]<- subset(plot_rich[[i]]$data, variable=="Shannon")
+  
+      mean_descp_shannon[[i]]<- df_shannon[[i]] %>%
+        group_by(SampleType, Description4) %>%
+        summarize_at(vars(value), list(average = mean, sd=sd))
+       
+      mean_descp_shannon[[i]] <- as.data.frame(mean_descp_shannon[[i]])
+
+       richness [[i]]<- ggplot(mean_descp_shannon[[i]], aes(x = Description4, y = average, fill = Description4)) + 
+         geom_bar(stat = "identity", position = position_dodge()) + 
+         geom_errorbar(aes(ymin=average-sd, ymax=average+sd), width=.2, position=position_dodge(.9)) +
+         scale_fill_manual(values=swales_col) +
+         scale_color_manual(values=swales_col) +
+         coord_flip() +
+         ylab("") +
+         ggtitle(str_c(list_swales$title[[i]]))
+         theme_bw()
+
+        # summary(lm(Shannon ~ SampleType, data = ps_richness))
+        #if necessary, can use estimate_richness() to export the estimated number of standard alpha diversity
+
+
+         print(richness[[i]])
+     }
+```
+
+```{r}
+
+#create common legend for the combined ggplots
+
+ grid_fig_rich <-  ggarrange(richness[[1]],
+                             richness[[2]], 
+                             richness[[3]],
+                                     align="hv",
+                                     ncol=3, nrow=1, 
+                                     common.legend = TRUE, legend = "top",
+                                     font.label = list(size=20))
+
+      grid_fig_rich
+   ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_richness_shanon.pdf", grid_fig_rich, 
+           height = 15, width = 30, dpi = 300)
+   
+```
+
+### 5.1.2 Print diversity
+```{r}
+df_shannon <- list()
+mean_descp_shannon <- list()
+
+     for (i in 1:3) {
+
+df_shannon[[i]]<- subset(plot_rich[[i]]$data, variable=="Shannon")
+  
+mean_descp_shannon[[i]]<- df_shannon[[i]] %>%
+    group_by(SampleType, Description4) %>%
+    summarize_at(vars(value),
+               list(average = mean, sd=sd))
+
+}
+```
+
+```{r}
+# all
+mean_descp_shannon[[1]]
+```
+
+```{r}
+# swale X
+mean_descp_shannon[[2]]
+```
+
+```{r}
+# swale Y
+mean_descp_shannon[[3]]
+```
+
+### 5.1.3 Test the differences
+
+t-value/ test statistic is calculated by comparing your sample mean(s) to the null hypothesis and incorporates both the sample size and the variability in the data.
+A t-value of 0 indicates that the sample results exactly equal the null hypothesis or no differences.
+
+t-distribution/df is calculated based on sample size. As the df increases, the probability density in the tails decreases and the distribution become more tightly clustered around the cnetral value. i.e. if you have a small sample, the probability that the sample statistic will be further away frmo the null hypothesis is greater even when the null hypothesis is true.
+
+p-value indicate the probability for observing a diffference from the null hypothesis, the common significance level is 0.05.
+https://blog.minitab.com/en/adventures-in-statistics-2/understanding-t-tests-t-values-and-t-distributions
+
+
+
+all
+```{r}
+shan_all <- df_shannon[[1]]
+dim(shan_all) # 24 22
+
+# subset tsunami data
+shan_tsu_all<- subset(shan_all, SampleType == "Tsunami deposit", drop = TRUE)
+dim(shan_tsu_all) # 11 22
+
+#remove pre sandsheet D to have even variables
+shan_post_all<- subset(shan_all, !(Description4 %in% c("Pre_Sandsheet D")))
+shan_post_all <- subset(shan_post_all, SampleType == "Soil and terrestrial samples", drop = TRUE)
+dim(shan_post_all) # 12 22
+```
+
+
+```{r}
+shan_res_all <- t.test(shan_post_all$value, shan_tsu_all$value, paired=FALSE)
+cat("\nDiversity - all \n================ \n")
+shan_res_all
+```
+
+all - test differences between upper and lower
+```{r}
+# subset upper layer data
+shan_upper_all<- subset(shan_all, SampleType4 == "A1", drop = TRUE)
+dim(shan_upper_all) # 11 22
+
+#remove pre sandsheet D to have even variables
+shan_lower_all<- subset(shan_all, !(Description4 %in% c("Pre_Sandsheet D")))
+shan_lower_all <- subset(shan_lower_all, SampleType4 == "B1", drop = TRUE)
+dim(shan_lower_all) # 12 22
+```
+
+
+```{r}
+shan_res_all2 <- t.test(shan_upper_all$value, shan_lower_all$value, paired=FALSE)
+cat("\nDiversity - all - upper VS lower \n================ \n")
+shan_res_all2
+```
+ all - swale X vs swale Y
+
+```{r}
+shan_X <- df_shannon[[2]]
+shan_Y <- df_shannon[[3]]
+
+shan_res_all3 <- t.test(shan_X$value, shan_Y$value, paired=FALSE)
+cat("\nDiversity - all - swaleX VS swaleY \n================ \n")
+shan_res_all3
+``` 
+
+swale X
+```{r}
+shan_X <- df_shannon[[2]]
+dim(shan_X) # 17 22
+
+# subset tsunami data
+shan_tsu<- subset(shan_X, SampleType == "Tsunami deposit", drop = TRUE)
+dim(shan_tsu) # 8 22
+
+#remove pre sandsheet D to have even variables
+shan_post<- subset(shan_X, !(Description4 %in% c("Pre_Sandsheet D")))
+shan_post <- subset(shan_post, SampleType == "Soil and terrestrial samples", drop = TRUE)
+dim(shan_post) # 8 22
+```
+
+
+```{r}
+shan_res <- t.test(shan_post$value, shan_tsu$value, paired=TRUE)
+cat("\nDiversity - swale X \n=================== \n")
+shan_res
+```
+
+swale Y
+```{r}
+shan_Y <- df_shannon[[3]]
+dim(shan_Y) # 7 22
+
+# subset tsunami data
+shan_tsu_Y<- subset(shan_Y, SampleType == "Tsunami deposit", drop = TRUE)
+dim(shan_tsu_Y) # 3 22
+
+#remove pre sandsheet D to have even variables
+shan_post_Y<- subset(shan_Y, !(Description4 %in% c("Pre_Sandsheet D")))
+shan_post_Y <- subset(shan_post_Y, SampleType == "Soil and terrestrial samples", drop = TRUE)
+dim(shan_post_Y) # 4 22
+```
+
+
+```{r}
+shan_res_Y <- t.test(shan_post_Y$value, shan_tsu_Y$value, paired=FALSE)
+cat("\nDiversity - swale Y \n=================== \n")
+shan_res_Y
+```
+
+t.test shows that all diversity have p-value > 0.45, more than the significant level alpha = 0.05
+there is no significant differences between mean diversity for tsunami deposits and non-tsunami deposits. 
+
+## 5.2 Ordination analysis
+### 5.2.1 Square root transform data
+
+```{r}
+ps_transform <- function(ps, title) {
+   ps = transform_sample_counts(ps, sqrt)
+    cat(str_c("\nPhyloseq ", title, "\n========== \n"))
+    print(ps)
+}
+
+```
+
+```{r}
+ps_trans_all = ps_transform(list_swales$ps[[1]], list_swales$title[[1]])
+```
+
+```{r}
+ps_trans_X = ps_transform(list_swales$ps[[2]], list_swales$title[[2]])
+```
+
+```{r}
+ps_trans_Y = ps_transform(list_swales$ps[[3]], list_swales$title[[3]])
+```
+
+```{r}
+list_trans <- list(ps = c(ps_trans_all, ps_trans_X, ps_trans_Y), 
+                title = c("all", "Swale X", "Swale Y"))
+
+```
+
+### 5.2.2 Plotting PCoA
+
+```{r}
+plot_pcoa1 <- list()
+
+for (i in 1:length(list_trans$ps)) {
+  ps_pcoa1 <- list_trans$ps[[i]]
+  
+  pcoa.ord <- phyloseq::ordinate(ps_pcoa1, "PCoA", "bray")
+  
+  # Fit environmental parameters
+  env_var <- phyloseq::sample_variables(ps_pcoa1)
+  env_matrix <- phyloseq::get_variable(ps_pcoa1, c("C","N","S","Depth_cm"))
+  env_fit <- vegan::envfit(pcoa.ord$vectors, 
+                            env = env_matrix, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows <- data.frame(env_fit$vectors$arrows * sqrt(env_fit$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+  # Factor to move the labels
+  #factor <- 1.5
+  # I didn't do Axis.1*factor when plotting      
+  
+  plot_pcoa1[[i]] <- plot_ordination(physeq = ps_pcoa1, pcoa.ord,
+                                      color = "Description4") + 
+      #geom_point(aes(shape = SamplingSite)) +
+      geom_point(aes(size = Year, shape = SampleType)) +
+      geom_text_repel (label = ps_pcoa1@sam_data$Description4, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "Soil and terrestrial samples" = "#2E2123", "Tsunami deposit"= "#DEC447")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+    scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = rel(2))) + 
+    theme(axis.text.x = element_text(size = rel(2), angle = 90, hjust = 0.5)) +
+    theme(axis.title = element_text(size=rel(2))) +
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(2)),
+          panel.background = element_blank(),
+          panel.grid.minor = element_blank(), 
+          plot.title = element_text(size = rel(2), hjust = 0.5, face = 'bold')) +
+      labs(title = str_c("PCoA - Bray - ", list_trans$title[[i]])) +
+    #stat_ellipse (aes(x=Axis.1, y=Axis.2, color=SampleType), level=0.95, linetype=2, inherit.aes = FALSE) +
+    geom_segment(data = env_arrows, 
+                         aes(x = 0, xend = Axis.1, 
+                             y = 0, yend = Axis.2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows, 
+                      aes(x = Axis.1, y = Axis.2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3)
+  
+    print(plot_pcoa1[[i]])
+  
+
+}
+```
+
+save plot as grid
+```{r}
+  grid_fig_pcoa<- ggarrange(plot_pcoa1[[1]],
+                            plot_pcoa1[[2]],
+                            plot_pcoa1[[3]],
+                          labels = c("A", "B", "C"),
+                          align = "hv", 
+                          ncol = 3, nrow =1,
+                          common.legend = TRUE,
+                          legend = "top")
+
+  grid_fig_pcoa
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_pcoa.pdf", grid_fig_pcoa, 
+          height = 15, width = 30, dpi = 300)
+```
+
+
+
+### 5.2.3 PCoA with different axis
+```{r}
+
+axes_to_plot <- c(1,2,3,4,5)
+plot1 <- list()
+
+for (i in 1:(length(axes_to_plot)-1)){
+  
+  pcoa.ord <- phyloseq::ordinate(ps_trans_all, "PCoA", "bray")
+  
+  plot1[[i]] <- plot_ordination(physeq = ps_trans_all, pcoa.ord, 
+                           axes = c(axes_to_plot[i],axes_to_plot[i+1]), shape = "SampleType", color = "Description4") + 
+    geom_point(aes(shape = SampleType, color = Description4), size = 6) + 
+    geom_text_repel (label = ps_trans_all@sam_data$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "2004IOT deposits"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+    scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = rel(2))) + 
+    theme(axis.text.x = element_text(size = rel(2), angle = 90, hjust = 0.5)) +
+    theme(axis.title = element_text(size=rel(2))) +
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(2)),
+          panel.background = element_blank(),
+          panel.grid.minor = element_blank(), 
+          plot.title = element_text(size = rel(2), hjust = 0.5, face = 'bold')) +
+    labs(title = str_c("PCoA - Bray, Axes ",axes_to_plot[i]," and ", axes_to_plot[(i+1)]))
+  
+  print(plot1[[i]])
+  
+}
+ 
+
+```
+save plot as grid
+```{r}
+  grid_fig_pcoa_axis<- ggarrange(plot1[[1]],
+                            plot1[[2]],
+                            plot1[[3]],
+                            plot1[[4]],
+                          labels = c("A", "B", "C", "D"),
+                          align = "hv", 
+                          ncol = 2, nrow =2,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+  grid_fig_pcoa_axis
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_pcoa_axis.pdf", grid_fig_pcoa_axis, 
+          height = 30, width = 30, dpi = 300)
+```
+
+### 5.2.4 PCoA different axis - swale X
+```{r}
+
+axes_to_plot <- c(1,2,3,4,5)
+plot1x <- list()
+
+for (i in 1:(length(axes_to_plot)-1)){
+  
+  pcoa.ord <- phyloseq::ordinate(ps_trans_X, "PCoA", "bray")
+  
+  plot1x[[i]] <- plot_ordination(physeq = ps_trans_X, pcoa.ord, 
+                           axes = c(axes_to_plot[i],axes_to_plot[i+1]), shape = "SampleType", color = "Description4") + 
+    geom_point(aes(shape = SampleType, color = Description4), size = 6) + 
+    geom_text_repel (label = ps_trans_X@sam_data$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "2004IOT deposits"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+    scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = rel(2))) + 
+    theme(axis.text.x = element_text(size = rel(2), angle = 90, hjust = 0.5)) +
+    theme(axis.title = element_text(size=rel(2))) +
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(2)),
+          panel.background = element_blank(),
+          panel.grid.minor = element_blank(), 
+          plot.title = element_text(size = rel(2), hjust = 0.5, face = 'bold')) +
+    labs(title = str_c("PCoA (Swale X) - Bray, Axes ",axes_to_plot[i]," and ", axes_to_plot[(i+1)]))
+  
+  print(plot1x[[i]])
+  
+}
+ 
+
+```
+save plot as grid
+```{r}
+  grid_fig_pcoa_axisX<- ggarrange(plot1x[[1]],
+                            plot1x[[2]],
+                            plot1x[[3]],
+                            plot1x[[4]],
+                          labels = c("A", "B", "C", "D"),
+                          align = "hv", 
+                          ncol = 2, nrow =2,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+  grid_fig_pcoa_axisX
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_pcoa_axis_swaleX.pdf", grid_fig_pcoa_axisX, 
+          height = 30, width = 30, dpi = 300)
+```
+
+### 5.2.5 PCoA separate layers
+Create a list that separate each layers
+```{r}
+# remove Sandsheet D
+ps_nmds_ABC <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet D", "Pre_Sandsheet D")))
+ps_nmds_ABC <- prune_taxa(taxa_sums(ps_nmds_ABC) > 0, ps_nmds_ABC)
+
+# remove Sandsheet D and C
+ps_nmds_AB <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet D", "Pre_Sandsheet D", "Sandsheet C", "Pre_Sandsheet C")))
+ps_nmds_ABC <- prune_taxa(taxa_sums(ps_nmds_ABC) > 0, ps_nmds_ABC)
+
+# remove Sandsheet C
+ps_nmds_ABD <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet C", "Pre_Sandsheet C")))
+ps_nmds_ABC <- prune_taxa(taxa_sums(ps_nmds_ABC) > 0, ps_nmds_ABC)
+
+# remove Sandsheet B, C, D
+ps_nmds_A <- subset_samples(ps_trans_all, Description4 %in% c("Sandsheet A", "PreSandsheet A", "PostSandsheet A"))
+ps_nmds_A <- prune_taxa(taxa_sums(ps_nmds_A) > 0, ps_nmds_A)
+```
+
+```{r}
+list_layers <- list(ps = c(ps_nmds_A, ps_nmds_AB, ps_nmds_ABC, ps_trans_all), 
+                title = c("just A", "A vs B", "A vs B vs C", "all"))
+```
+
+```{r}
+plot_pcoa_layers <- list()
+
+for (i in 1:length(list_layers$ps)) {
+  ps_pcoa1 <- list_layers$ps[[i]]
+  
+  pcoa.ord <- phyloseq::ordinate(ps_pcoa1, "PCoA", "bray")
+  
+  # Fit environmental parameters
+  env_var <- phyloseq::sample_variables(ps_pcoa1)
+  env_matrix <- phyloseq::get_variable(ps_pcoa1, c("C","N","S","Depth_cm"))
+  env_fit <- vegan::envfit(pcoa.ord$vectors, 
+                            env = env_matrix, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows <- data.frame(env_fit$vectors$arrows * sqrt(env_fit$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+  # Factor to move the labels
+  #factor <- 1.5
+  # I didn't do Axis.1*factor when plotting      
+  
+  plot_pcoa_layers[[i]] <- plot_ordination(physeq = ps_pcoa1, pcoa.ord,
+                                      color = "Description4") + 
+      #geom_point(aes(shape = SamplingSite)) +
+      geom_point(aes(size = Year, shape = SampleType)) +
+      geom_text_repel (label = ps_pcoa1@sam_data$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "2004IOT deposits"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+    scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = rel(2))) + 
+    theme(axis.text.x = element_text(size = rel(2), angle = 90, hjust = 0.5)) +
+    theme(axis.title = element_text(size=rel(2))) +
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(2)),
+          panel.background = element_blank(),
+          panel.grid.minor = element_blank(), 
+          plot.title = element_text(size = rel(2), hjust = 0.5, face = 'bold')) +
+      labs(title = str_c("PCoA - Bray - ", list_layers$title[[i]])) +
+    #stat_ellipse (aes(x=Axis.1, y=Axis.2, color=SampleType2), level=0.95, linetype=2, inherit.aes = FALSE) +
+    geom_segment(data = env_arrows, 
+                         aes(x = 0, xend = Axis.1, 
+                             y = 0, yend = Axis.2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows, 
+                      aes(x = Axis.1, y = Axis.2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3)
+  
+    print(plot_pcoa_layers[[i]])
+  
+
+}
+```
+
+```{r}
+  grid_fig_pcoa_layers<- ggarrange(plot_pcoa_layers[[1]],
+                            plot_pcoa_layers[[2]],
+                            plot_pcoa_layers[[3]],
+                            plot_pcoa_layers[[4]],
+                          labels = c("A", "B", "C", "D"),
+                          align = "hv", 
+                          ncol = 2, nrow = 2,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+  grid_fig_pcoa_layers
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_pcoa_layers.pdf", grid_fig_pcoa_layers, 
+          height = 30, width = 30, dpi = 300)
+```
+
+### 5.2.6 Compare each layers
+```{r}
+# remove Sandsheet B, C, D
+ps_nmds_A <- subset_samples(ps_trans_all, Description4 %in% c("Sandsheet A", "PreSandsheet A", "PostSandsheet A"))
+ps_nmds_A <- prune_taxa(taxa_sums(ps_nmds_A) > 0, ps_nmds_A)
+
+# remove Sandsheet B, C, D
+ps_nmds_B <- subset_samples(ps_trans_all, Description4 %in% c("Sandsheet B", "PreSandsheet A", "Pre_Sandsheet B"))
+ps_nmds_B <- prune_taxa(taxa_sums(ps_nmds_B) > 0, ps_nmds_B)
+
+# remove Sandsheet B, C, D
+ps_nmds_C <- subset_samples(ps_trans_all, Description4 %in% c("Sandsheet C", "Pre_Sandsheet C", "Pre_Sandsheet B"))
+ps_nmds_C <- prune_taxa(taxa_sums(ps_nmds_C) > 0, ps_nmds_C)
+
+# remove Sandsheet B, C, D
+ps_nmds_D <- subset_samples(ps_trans_all, Description4 %in% c("Sandsheet D", "Pre_Sandsheet D", "Pre_Sandsheet C"))
+ps_nmds_D <- prune_taxa(taxa_sums(ps_nmds_D) > 0, ps_nmds_D)
+
+```
+
+```{r}
+list_layers2 <- list(ps = c(ps_nmds_A, ps_nmds_B, ps_nmds_C, ps_nmds_D), 
+                title = c("postA vs A vs preA",
+                          "preA vs B vs preB",
+                          "preB vs C vs preC",
+                          "preC vs D vs preD"))
+```
+
+```{r}
+plot_pcoa_layers2 <- list()
+
+for (i in 1:length(list_layers2$ps)) {
+  ps_pcoa1 <- list_layers2$ps[[i]]
+  
+  pcoa.ord <- phyloseq::ordinate(ps_pcoa1, "PCoA", "bray")
+  
+  # Fit environmental parameters
+  env_var <- phyloseq::sample_variables(ps_pcoa1)
+  env_matrix <- phyloseq::get_variable(ps_pcoa1, c("C","N","S","Depth_cm"))
+  env_fit <- vegan::envfit(pcoa.ord$vectors, 
+                            env = env_matrix, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows <- data.frame(env_fit$vectors$arrows * sqrt(env_fit$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+  # Factor to move the labels
+  #factor <- 1.5
+  # I didn't do Axis.1*factor when plotting      
+  
+  plot_pcoa_layers2[[i]] <- plot_ordination(physeq = ps_pcoa1, pcoa.ord,
+                                      color = "Description4") + 
+      #geom_point(aes(shape = SamplingSite)) +
+      geom_point(aes(size = Year, shape = SampleType)) +
+      geom_text_repel (label = ps_pcoa1@sam_data$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "2004IOT deposits"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+    scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = rel(2))) + 
+    theme(axis.text.x = element_text(size = rel(2), angle = 90, hjust = 0.5)) +
+    theme(axis.title = element_text(size=rel(2))) +
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(2)),
+          panel.background = element_blank(),
+          panel.grid.minor = element_blank(), 
+          plot.title = element_text(size = rel(2), hjust = 0.5, face = 'bold')) +
+      labs(title = str_c("PCoA - Bray - ", list_layers2$title[[i]])) +
+    #stat_ellipse (aes(x=Axis.1, y=Axis.2, color=SampleType2), level=0.95, linetype=2, inherit.aes = FALSE) +
+    geom_segment(data = env_arrows, 
+                         aes(x = 0, xend = Axis.1, 
+                             y = 0, yend = Axis.2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows, 
+                      aes(x = Axis.1, y = Axis.2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3)
+  
+    print(plot_pcoa_layers2[[i]])
+  
+
+}
+```
+
+```{r}
+  grid_fig_pcoa_layers2<- ggarrange(plot_pcoa_layers2[[1]],
+                            plot_pcoa_layers2[[2]],
+                            plot_pcoa_layers2[[3]],
+                            plot_pcoa_layers2[[4]],
+                          labels = c("A", "B", "C", "D"),
+                          align = "hv", 
+                          ncol = 2, nrow = 2,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+  grid_fig_pcoa_layers2
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_pcoa_layers2.pdf", grid_fig_pcoa_layers2, 
+          height = 30, width = 30, dpi = 300)
+```
+
+
+### 5.2.7 Plot NMDS
+Ordination scatterplots
+```{r}
+ps_bray<- phyloseq::distance(ps_trans_all, method="bray")
+nmds_ord<- ordinate(ps_trans_all, "NMDS", ps_bray, k=2, trymax=500)
+```
+Our data reached a convergent solution at around 20 iteration and the stress is below 0.2. 
+If stress value are high, may need to add more axes to the ordination. Plotting stress vs number of axes will reveal a "break point" after which stress does not decrease much.
+
+If stress is high, reposition the points in m dimensions in the direction of decreasing stress, and repeat until stress is below some threshold 
+
+Generally, stress < 0.05 provides an excellent representation in reduced dimensions, < 0.1 is great, < 0.2 is good, and stress > 0.3 provides a poor representation
+
+```{r}
+stressplot(nmds_ord)
+```
+
+```{r}
+# remove Sandsheet D
+ps_ABC <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet D", "Pre_Sandsheet D")))
+ps_ABC <- prune_taxa(taxa_sums(ps_ABC) > 0, ps_ABC)
+
+# remove Sandsheet C, D
+ps_AB <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet D", "Pre_Sandsheet D", "Sandsheet C", "Pre_Sandsheet C", "Pre_Sandsheet B")))
+ps_AB <- prune_taxa(taxa_sums(ps_AB) > 0, ps_AB)
+
+# remove Sandsheet A, B
+ps_CD <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet A", "PreSandsheet A", "SandsheetB", "PostSandsheet A")))
+ps_CD <- prune_taxa(taxa_sums(ps_CD) > 0, ps_CD)
+
+# remove Sandsheet A, B (include Pre_Sandsheet B)
+ps_CD2 <- subset_samples(ps_trans_all, !(Description4 %in% c("Sandsheet A", "PreSandsheet A", "SandsheetB", "PostSandsheet A", "Pre_Sandsheet B")))
+ps_CD2 <- prune_taxa(taxa_sums(ps_CD2) > 0, ps_CD2)
+
+
+```
+
+```{r}
+list_layers1 <- list(ps = c(ps_trans_all, ps_ABC, ps_AB, ps_CD, ps_CD2), 
+                title = c("all",
+                          "A vs B vs C",
+                          "A vs B",
+                          "C vs D",
+                          "C vs D (exclude preB)"))
+```
+
+
+```{r}
+plot_nmds1 <- list()
+env_fit1<- list()
+
+for (i in 1:length(list_layers1$ps)) {
+  ps_nmds1 <- list_layers1$ps[[i]]
+  
+  ps_bray1<- phyloseq::distance(ps_nmds1, method="bray")
+  nmds_ord1<- ordinate(ps_nmds1, "NMDS", ps_bray1, k=2, trymax=500)
+  
+  # Fit environmental parameters
+  env_var1 <- phyloseq::sample_variables(ps_nmds1)
+  env_matrix1 <- phyloseq::get_variable(ps_nmds1, c("C","N","S","Depth_cm", "mean_phi", "sorting"))
+  env_fit1[[i]] <- vegan::envfit(nmds_ord1$points, 
+                            env = env_matrix1, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows1 <- data.frame(env_fit1[[i]]$vectors$arrows * sqrt(env_fit1[[i]]$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+# plot NMDS
+plot_nmds1[[i]]<- plot_ordination(ps_nmds1, nmds_ord1, type="samples", color = "Description4", shape = "SampleType") +
+  geom_point(aes(shape = SampleType, color = Description4), size = 5) + 
+  geom_text_repel (label = ps_nmds1@sam_data$id, size = 5, 
+                     box.padding = unit(0.35, "lines"),
+                     point.padding = unit(0.5, "lines")) +
+  scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "A1"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","B1" = "#FBE67C")) +
+    #scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+  labs(title = str_c("NMDS - Bray - ", list_layers1$title[[i]])) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 12, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=12),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank()) +
+  #stat_ellipse (aes(data=nmds_ord1$points, x=NMDS1, y=NMDS2, color=SampleType4), level=0.90, linetype=2, inherit.aes = FALSE) +
+      geom_segment(data = env_arrows1, 
+                         aes(x = 0, xend = MDS1, 
+                             y = 0, yend = MDS2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows1, 
+                      aes(x = MDS1, y = MDS2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3)
+    
+    print(plot_nmds1[[i]])
+    print(env_fit1[[i]])
+    
+}
+```
+save plot as grid
+```{r}
+  grid_fig_nmds<- ggarrange(plot_nmds1[[1]],
+                            plot_nmds1[[2]],
+                            plot_nmds1[[3]],
+                            plot_nmds1[[4]],
+                          #labels = c("A", "B", "C", "D"),
+                          align = "hv", 
+                          ncol = 2, nrow =2,
+                          common.legend = TRUE,
+                          legend = "top")
+
+  #grid_fig_nmds
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_nmds.pdf", grid_fig_nmds, 
+          height = 30, width = 30, dpi = 300)
+```
+```{r}
+nmds_ord2<- ordinate(ps_trans_all, "NMDS", ps_bray1, k=5, trymax=500)
+
+```
+
+```{r}
+stressplot(nmds_ord2)
+```
+
+
+```{r}
+nmds_ord3<- ordinate(ps_trans_all, "NMDS", ps_bray1, k=3)
+
+```
+
+```{r}
+plot_nmds3<- plot_ordination(ps_trans_all, nmds_ord3, type="samples", color = "Description4", shape = "SampleType") +
+  geom_point(aes(shape = SampleType, color = Description4), size = 5) + 
+  geom_text_repel (label = ps_trans_all@sam_data$id, size = 5, 
+                     box.padding = unit(0.35, "lines"),
+                     point.padding = unit(0.5, "lines")) +
+  scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "modern-tsunami deposit"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    #facet_wrap(~SampleType4) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+  labs(title = str_c("NMDS - Bray - ", list_layers1$title[[1]])) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 12, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=12),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank())
+plot_nmds3
+```
+
+```{r}
+nmds_ord3_iso<- ordinate(ps_trans_all, "NMDS", ps_bray1, k=3, engine=c("isoMDS"))
+
+```
+
+```{r}
+plot_nmds3_iso<- plot_ordination(ps_trans_all, nmds_ord3_iso, type="samples", color = "Description4", shape = "SampleType") +
+  geom_point(aes(shape = SampleType, color = Description4), size = 5) + 
+  geom_text_repel (label = ps_trans_all@sam_data$id, size = 5, 
+                     box.padding = unit(0.35, "lines"),
+                     point.padding = unit(0.5, "lines")) +
+  scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "modern-tsunami deposit"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    #facet_wrap(~SampleType4) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+  labs(title = str_c("NMDS - Bray - ", list_layers1$title[[1]])) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 12, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=12),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank())
+
+plot_nmds3_iso
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_nmds2.pdf", plot_nmds2, 
+          height = 30, width = 30, dpi = 300)
+```
+
+### 5.2.8 Plot NMDS with different axis
+
+```{r}
+axes_to_plot <- c(1,2,3,4,5)
+plot2 <- list()
+
+for (i in 1:(length(axes_to_plot)-1)){
+  
+  ps_bray1<- phyloseq::distance(ps_trans_all, method="bray")
+  nmds_ord1<- ordinate(ps_trans_all, "NMDS", ps_bray1, k=5)
+  
+  plot2[[i]] <- plot_ordination(physeq = ps_trans_all, nmds_ord1, 
+                           axes = c(axes_to_plot[i],axes_to_plot[i+1]), shape = "SampleType", color = "Description4") + 
+  geom_point(aes(shape = SampleType, color = Description4), size = 5) + 
+  geom_text_repel (label = ps_trans_all@sam_data$id, size = 5, 
+                     box.padding = unit(0.35, "lines"),
+                     point.padding = unit(0.5, "lines")) +
+  scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "modern soil and terrestrial samples" = "#2E2123", "modern-tsunami deposit"= "#DEC447", "Soil and terrestrial samples" = "#9A5A21","palaeo-tsunami deposit" = "#FBE67C")) +
+    #facet_wrap(~SampleType4) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+    coord_equal() +
+  labs(title = str_c("NMDS - Bray - ", list_layers1$title[[1]])) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 12, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=12),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank())
+  
+  print(plot2[[i]])
+  
+}
+```
+
+Something to consider to play around with NMDS 
+Step-across dissimilarities: Ordination may be very difficult if a large proportion of sites have no shared species. In this case, the results may be improved with stepacross dissimilarities, or flexible shortest paths among all sites. The default NMDS engine is monoMDS which is able to break tied values at the maximum dissimilarity, and this often is sufficient to handle cases with no shared species, and therefore the default is not to use stepacross with monoMDS. Function isoMDS does not handle tied values adequately, and therefore the default is to use stepacross always when there are sites with no shared species with engine = "isoMDS". The stepacross is triggered by option noshare. If you do not like manipulation of original distances, you should set noshare = FALSE. This step is skipped if input data were dissimilarities instead of community data. This step is performed using metaMDSdist, and the step is skipped always when input were dissimilarities.
+
+### 5.2.9 Plot dbRDA
+
+Including sampling depth as interaction variables
+```{r}
+array_dbrda_loc <- list()
+env_fit <- list()
+
+for (i in 1:length(list_trans$ps)) {
+
+    
+  ps_dbrda_loc <- list_trans$ps[[i]]
+  
+  # Remove samples with no reads
+  ps_dbrda_loc <- prune_samples(sample_sums(ps_dbrda_loc) > 0, ps_dbrda_loc)
+    
+  bray_cap_loc<- ordinate(ps_dbrda_loc, "CAP", "bray", ~SampleType2 + Depth_cm)
+
+  env_var <- phyloseq::sample_variables(ps_dbrda_loc)
+  env_matrix <- phyloseq::get_variable(ps_dbrda_loc, c("C","N","S","Depth_cm","mean_phi","sorting"))
+  env_fit[[i]] <- vegan::envfit(bray_cap_loc, 
+                            env = env_matrix, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows <- data.frame(env_fit[[i]]$vectors$arrows * sqrt(env_fit[[i]]$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+  array_dbrda_loc[[i]]<- plot_ordination(ps_dbrda_loc, bray_cap_loc, type="samples", title = "dbRDA - bray - all ASVs") +
+  geom_point(aes(color = Description4, shape = SampleType, size = Year)) + 
+  geom_text_repel (label = ps_dbrda_loc@sam_data$id, size = 5,
+                    box.padding = unit(0.8, "lines"),
+                    point.padding = unit(0.5, "lines")) +
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "Soil and terrestrial samples" = "#2E2123", "Tsunami deposit"= "#DEC447")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+  stat_ellipse (aes(x=CAP1, y=CAP2, color=SampleType), level=0.95, linetype=2, inherit.aes = FALSE) +
+    coord_flip() +
+    scale_x_reverse() +
+    geom_segment(data = env_arrows, 
+                         aes(x = 0, xend = CAP1, 
+                             y = 0, yend = CAP2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows, 
+                      aes(x = CAP1, y = CAP2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3) +
+  theme_bw() +
+    theme(plot.title = element_text(size = 22, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=16),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", 
+          legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank()) +
+    labs(title = str_c(list_trans$title[[i]], "- dbRDA - bray_curtis"))
+
+#  array_dbrda_loc[[i]]
+#  print(array_dbrda_loc[[i]])
+  
+  cat(str_c("\nPhyloseq ", list_trans$title[[i]], "\n========== \n"))
+  print(env_fit[[i]])
+  
+}
+```
+Save dbRDA plot
+```{r}
+grid_dbrda<- ggarrange(array_dbrda_loc[[1]],
+                       array_dbrda_loc[[2]],
+                       array_dbrda_loc[[3]],
+                       labels = c("A","B","C"),
+                          align = "hv", 
+                          ncol = 3, nrow =1,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+#    grid_dbrda
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_dbrda_depth.pdf", grid_dbrda, 
+          height = 15, width = 30, dpi = 300)
+```
+
+Calculating dbRDA using SampleType2
+```{r}
+array_dbrda_loc <- list()
+env_fit <- list()
+
+for (i in 1:length(list_trans$ps)) {
+
+    
+  ps_dbrda_loc <- list_trans$ps[[i]]
+  
+  # Remove samples with no reads
+  ps_dbrda_loc <- prune_samples(sample_sums(ps_dbrda_loc) > 0, ps_dbrda_loc)
+    
+  bray_cap_loc<- ordinate(ps_dbrda_loc, "CAP", "bray", ~SampleType2)
+
+  env_var <- phyloseq::sample_variables(ps_dbrda_loc)
+  env_matrix <- phyloseq::get_variable(ps_dbrda_loc, c("C","N","S","Depth_cm"))
+  env_fit[[i]] <- vegan::envfit(bray_cap_loc, 
+                            env = env_matrix, 
+                            perm = 999, na.rm = TRUE)
+  env_arrows <- data.frame(env_fit[[i]]$vectors$arrows * sqrt(env_fit[[i]]$vectors$r)) %>% 
+    rownames_to_column(var = "parameter")
+  
+  
+  array_dbrda_loc[[i]]<- plot_ordination(ps_dbrda_loc, bray_cap_loc, type="samples", title = "dbRDA - bray - all ASVs") +
+  geom_point(aes(color = Description4, shape = SampleType, size = Year)) + 
+  geom_text_repel (label = ps_dbrda_loc@sam_data$id, size = 5,
+                    box.padding = unit(0.8, "lines"),
+                    point.padding = unit(0.5, "lines")) +
+  #scale_color_manual(values=c("PostSandsheet A" = "#97B384", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#96C5B1",  "Sandsheet B"="#D0A338", "Pre_Sandsheet B"="#215807", "Sandsheet C"="#F2A86A", "Pre_Sandsheet C"="#B8C308", "Sandsheet D"="#F1E2D1", "Pre_Sandsheet D"="#1E4650", "Soil and terrestrial samples" = "#97B384", "Tsunami deposit"= "#DEC447")) +
+    scale_color_manual(values=c("PostSandsheet A" = "#2E2123", "Sandsheet A"="#DEC447",  "PreSandsheet A"="#503027",  "Sandsheet B"="#F6CF67", "Pre_Sandsheet B"="#79372B", "Sandsheet C"="#FBE67C", "Pre_Sandsheet C"="#9A5A21", "Sandsheet D"="#FFF57C", "Pre_Sandsheet D"="#FEB033", "Soil and terrestrial samples" = "#2E2123", "Tsunami deposit"= "#DEC447")) +
+    scale_shape_manual(values=c("Soil and terrestrial samples" = 19, "Tsunami deposit"= 17)) +
+      scale_size_continuous(breaks = c(2014,2015)) +
+  stat_ellipse (aes(x=CAP1, y=CAP2, color=SampleType), level=0.95, linetype=2, inherit.aes = FALSE) +
+    coord_flip() +
+    scale_x_reverse() +
+    geom_segment(data = env_arrows, 
+                         aes(x = 0, xend = CAP1, 
+                             y = 0, yend = CAP2), 
+                 inherit.aes = FALSE, arrow = arrow(length = unit(0.5, "cm")), colour = "black") + 
+    geom_text(data = env_arrows, 
+                      aes(x = CAP1, y = CAP2, 
+                          label = parameter), 
+              inherit.aes = FALSE, hjust = -0.2, vjust = -0.2, size = 3) +
+  theme_bw() +
+    theme(plot.title = element_text(size = 22, hjust = 0.5, face = 'bold'),
+               axis.text=element_text(size=16),
+               legend.title = element_blank(), 
+               legend.text = element_text(size = 22),
+               legend.position = "top", 
+          legend.box = "vertical",
+            panel.background = element_blank(),
+            panel.grid.minor = element_blank()) +
+    labs(title = str_c(list_trans$title[[i]], "- dbRDA - bray_curtis"))
+
+  array_dbrda_loc[[i]]
+#  print(array_dbrda_loc[[i]])
+  
+  cat(str_c("\nPhyloseq ", list_trans$title[[i]], "\n========== \n"))
+  print(env_fit[[i]])
+  
+}
+```
+
+Save dbRDA plot
+```{r}
+grid_dbrda<- ggarrange(array_dbrda_loc[[1]],
+                       array_dbrda_loc[[2]],
+                       array_dbrda_loc[[3]],
+                       labels = c("A","B","C"),
+                          align = "hv", 
+                          ncol = 3, nrow =1,
+                          common.legend = TRUE,
+                          legend = "top",
+                          font.label = list(size=20))
+
+#    grid_dbrda
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_dbrda_sampletype2.pdf", grid_dbrda, 
+          height = 15, width = 30, dpi = 300)
+```
+
+Calculating dbRDA using SampleType4
+```{r}
+ps_dbrda<- list_trans$ps[[1]]
+
+ps_dbrda <- prune_samples(sample_sums(ps_dbrda) > 0, ps_dbrda)
+
+    
+bray_dbrda<- ordinate(ps_dbrda, "CAP", "bray", ~SampleType2)
+bray_dbrda
+bray_dbrda$CCA$centroids
+
+
+bray_dbrda2<- ordinate(ps_dbrda, "CAP", "bray", ~SampleType4)
+bray_dbrda2
+bray_dbrda2$CCA$centroids
+
+```
+
+```{r}
+centroid_dbrda<- data.frame(distance_to_centroid=bray_dbrda2$CCA$Xbar, group=ps_dbrda@sam_data$SampleType4)
+
+boxplot_centroid<- ggplot(data=centroid_dbrda, aes(x=group, y=distance_to_centroid.Dim1, fill = group)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_grey(start=0.8, end=0.1) +
+  ylab("Distance to centroid") +
+  xlab("")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = rel(1.5))) + 
+  theme(axis.text.x = element_text(size = rel(1.5))) + 
+  theme(legend.position = "none") +
+  theme(legend.box = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size=rel(1)))+
+  guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+
+print(boxplot_centroid)
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_dbrda_centroid.pdf", boxplot_centroid, 
+          height = 30, width = 15, dpi = 300)
+```
+
+```{r}
+ #calculate multivariate dispersion i.e. average distance to median
+  betad1<- betadisper(ps_bray_, groups, type=c("median"))
+  betad1
+  
+  # perform test to see if the group dispersion are homogenous i.e. not significant p-value
+  anvB1<- anova(betad1)
+  anvB1
+```
+
+
+
+Statistical test for dbRDA
+```{r}
+cap_axis_anova <- list()
+cap_anova <- list()
+
+
+  for (i in 1:length(list_trans$ps)) {
+    
+  ps_dbrda_loc <- list_trans$ps[[i]]
+  bray_cap_loc<- ordinate(ps_dbrda_loc, "CAP", "bray", ~SampleType2)
+  bray_cap_loc
+  
+  
+  cap_anova [[i]]<- anova(bray_cap_loc) ## overall test of the significance of the analysis
+  
+  cap_axis_anova [[i]]<- anova(bray_cap_loc, by="axis", perm.max=500) #test the significance of each axis
+  cap_axis_anova
+  
+  labs(title = str_c(list_trans$title[[i]], "- dbRDA - bray_curtis"))
+  
+  write.table(cap_anova[[i]], file=str_c("../phyloseq_palaeo/fig_swale_2_diff_col_v2/cap_anova_braycurtis_",list_trans$title[[i]],".txt"), sep=",", quote=FALSE, row.names = F)
+  
+  write.table(cap_axis_anova[[i]], file=str_c("../phyloseq_palaeo/fig_swale_2_diff_col_v2/cap_axis_anova_braycurtis_", list_trans$title[[i]], ".txt"), sep=",", quote=FALSE, row.names = F)
+
+  
+  cat(str_c("\nANOVA on axis - ", list_trans$title[[i]], "\n========== \n"))
+  print(cap_axis_anova [[i]])
+  
+  cat(str_c("\nANOVA on ordination - ", list_trans$title[[i]], "\n========== \n"))
+  print(cap_anova [[i]])
+  
+  
+  }
+```
+
+## 5.3 Statistical test
+### 5.3.1 PERMANOVA - Bray
+
+```{r}
+permanova_swale <- list()
+
+     for (i in 1:length(list_layers1$ps)) {
+        
+        stat_permanova1 <- list_layers1$ps[[i]]
+        
+        #calculate bray curtis distance matrix
+        bray_swale1<- phyloseq::distance(stat_permanova1, method="bray")
+        
+        # make a dataframe from the sample_data
+        sampledf1<- data.frame(sample_data(list_layers1$ps[[i]]))
+        
+        #adonis test
+        permanova_swale[[i]]<- adonis(bray_swale1 ~ Swale + SampleType + Year, data = sampledf1, permutation=9999)
+        
+     cat(str_c("\nBray-Curtis - ", list_layers1$title[[i]], "\n========== \n"))
+  print(permanova_swale[[i]])
+     
+    }
+    
+```
+
+```{r}
+bray_swale2<- phyloseq::distance(ps_trans_all, method="bray")
+
+# make a dataframe from the sample_data
+sampledf2<- data.frame(sample_data(ps_trans_all))
+
+permanova2<- adonis2(bray_swale2 ~ Swale + SampleType + SampleType4 + Year, data = sampledf2, permutations=9999)
+
+permanova2
+```
+
+#### comparing each layers
+
+```{r}
+permanova_separate <- list()
+
+     for (i in 1:length(list_layers2$ps)) {
+        
+        stat_permanova <- list_layers2$ps[[i]]
+  
+        bray_swale<- phyloseq::distance(stat_permanova, method="bray")
+        
+        permanova_separate[[i]]<- adonis(bray_swale ~ stat_permanova@sam_data$Swale + stat_permanova@sam_data$SampleType + stat_permanova@sam_data$Year, permutation=9999)
+        
+     cat(str_c("\nBray-Curtis - ", list_layers2$title[[i]], "\n========== \n"))
+  print(permanova_separate[[i]])
+     
+    }
+    
+```
+
+#### separate swales and compare each layers
+For Swale X
+```{r}
+# remove Sandsheet B, C, D
+ps_nmds_XA <- subset_samples(ps_trans_X, Description4 %in% c("Sandsheet A", "PreSandsheet A", "PostSandsheet A"))
+ps_nmds_XA <- prune_taxa(taxa_sums(ps_nmds_XA) > 0, ps_nmds_XA)
+
+# remove Sandsheet B, C, D
+ps_nmds_XB <- subset_samples(ps_trans_X, Description4 %in% c("Sandsheet B", "PreSandsheet A", "Pre_Sandsheet B"))
+ps_nmds_XB <- prune_taxa(taxa_sums(ps_nmds_XB) > 0, ps_nmds_XB)
+
+# remove Sandsheet B, C, D
+ps_nmds_XC <- subset_samples(ps_trans_X, Description4 %in% c("Sandsheet C", "Pre_Sandsheet C", "Pre_Sandsheet B"))
+ps_nmds_XC <- prune_taxa(taxa_sums(ps_nmds_XC) > 0, ps_nmds_XC)
+
+# remove Sandsheet B, C, D
+ps_nmds_XD <- subset_samples(ps_trans_X, Description4 %in% c("Sandsheet D", "Pre_Sandsheet D", "Pre_Sandsheet C"))
+ps_nmds_XD <- prune_taxa(taxa_sums(ps_nmds_XD) > 0, ps_nmds_XD)
+
+```
+
+For Swale Y
+```{r}
+# remove Sandsheet B, C, D
+ps_nmds_YA <- subset_samples(ps_trans_Y, Description4 %in% c("Sandsheet A", "PreSandsheet A", "PostSandsheet A"))
+ps_nmds_YA <- prune_taxa(taxa_sums(ps_nmds_YA) > 0, ps_nmds_YA)
+
+# remove Sandsheet B, C, D
+ps_nmds_YB <- subset_samples(ps_trans_Y, Description4 %in% c("Sandsheet B", "PreSandsheet A", "Pre_Sandsheet B"))
+ps_nmds_YB <- prune_taxa(taxa_sums(ps_nmds_YB) > 0, ps_nmds_YB)
+
+# remove Sandsheet B, C, D
+ps_nmds_YC <- subset_samples(ps_trans_Y, Description4 %in% c("Sandsheet C", "Pre_Sandsheet C", "Pre_Sandsheet B"))
+ps_nmds_YC <- prune_taxa(taxa_sums(ps_nmds_YC) > 0, ps_nmds_YC)
+
+# remove Sandsheet B, C, D
+ps_nmds_YD <- subset_samples(ps_trans_Y, Description4 %in% c("Sandsheet D", "Pre_Sandsheet D", "Pre_Sandsheet C"))
+ps_nmds_YD <- prune_taxa(taxa_sums(ps_nmds_YD) > 0, ps_nmds_YD)
+
+```
+
+```{r}
+list_layers3 <- list(ps = c(ps_nmds_XA, ps_nmds_XB, ps_nmds_XC, ps_nmds_XD, 
+                            ps_nmds_YA, ps_nmds_YB, ps_nmds_YC, ps_nmds_YD), 
+                title = c("postA vs A vs preA (Swale X)",
+                          "preA vs B vs preB (Swale X)",
+                          "preB vs C vs preC (Swale X)",
+                          "preC vs D vs preD (Swale X)",
+                          "postA vs A vs preA (Swale Y)",
+                          "preA vs B vs preB (Swale Y)",
+                          "preB vs C vs preC (Swale Y)",
+                          "preC vs D vs preD (Swale Y)"))
+```
+
+```{r}
+permanova_separate_swale <- list()
+
+     for (i in 1:length(list_layers3$ps)) {
+        
+        stat_permanova <- list_layers3$ps[[i]]
+  
+        bray_swale<- phyloseq::distance(stat_permanova, method="bray")
+        
+        # make a dataframe from the sample_data
+        sampledf<- data.frame(sample_data(list_layers3$ps[[i]]))
+        
+        #adonis test
+        permanova_separate_swale[[i]]<- adonis(bray_swale ~ SampleType, data = sampledf, permutation=9999)
+        
+        
+     cat(str_c("\nBray-Curtis - ", list_layers3$title[[i]], "\n========== \n"))
+  print(permanova_separate_swale[[i]])
+     
+    }
+    
+```
+
+
+
+### 5.3.2 PERMANOVA - Jac
+
+```{r}
+permanova_swale_j <- list()
+
+     for (i in 1:length(list_layers1$ps)) {
+        
+        stat_permanova1 <- list_layers1$ps[[i]]
+        
+        #calculate bray curtis distance matrix
+        jac_swale1<- phyloseq::distance(stat_permanova1, method="jaccard")
+        
+        # make a dataframe from the sample_data
+        sampledf1<- data.frame(sample_data(list_layers1$ps[[i]]))
+        
+        #adonis test
+        permanova_swale_j[[i]]<- adonis(jac_swale1 ~ Swale + SampleType + Year, data = sampledf1, permutation=9999)
+        
+     cat(str_c("\nJaccard - ", list_layers1$title[[i]], "\n========== \n"))
+  print(permanova_swale_j[[i]])
+     
+    }
+    
+```
+
+
+#### comparing each layers
+
+```{r}
+permanova_separate_j <- list()
+
+     for (i in 1:length(list_layers2$ps)) {
+        
+        stat_permanova <- list_layers2$ps[[i]]
+  
+        jac_swale<- phyloseq::distance(stat_permanova, method="jaccard")
+        
+        permanova_separate_j[[i]]<- adonis(jac_swale ~ stat_permanova@sam_data$Swale + stat_permanova@sam_data$SampleType + stat_permanova@sam_data$Year, permutation=9999)
+        
+     cat(str_c("\nBray-Curtis - ", list_layers2$title[[i]], "\n========== \n"))
+  print(permanova_separate_j[[i]])
+     
+    }
+    
+```
+
+### 5.3.3 Beta dispersion
+Calculate the average distance of group members to the group centroid or spatial median in multivariate space.
+To test if the dispersions (variances) of one or more groups are different, the distance of group member to the group centroids are subject to ANOVA.
+```{r}
+
+  # define the group to test
+  groups<- factor(ps_trans_all@sam_data$SampleType3)
+  
+  ps_bray_<- phyloseq::distance(ps_trans_all, method="bray")
+
+
+  #calculate multivariate dispersion i.e. average distance to median
+  betad1<- betadisper(ps_bray_, groups, type=c("median"))
+  betad1
+  
+  # perform test to see if the group dispersion are homogenous i.e. not significant p-value
+  anvB1<- anova(betad1)
+  anvB1
+  
+  # permutation test for F
+  permB1<- permutest(betad1, permutation=9999, pair=TRUE)
+  permB1
+  
+  
+  # plot dispersion ordination
+  labs<- paste("Dimension", 1:4, "(",
+               round(100*betad1$eig / sum(betad1$eig), 2), "%)")
+  
+  beta_ordi<- plot(betad1, cex=1, pch=15:17,
+       main="All - SampleType2: MDS coordinates", cex.lab=1.25,
+     xlab=labs[1], ylab=labs[2],
+     hull=FALSE, ellipse=TRUE, conf=0.90, lwd=2)
+  beta_ordi
+  
+  
+  # boxplot of dispersion
+  beta_box<- boxplot(betad1, xlab="SampleType2", notch=FALSE)
+  beta_box
+
+```
+
+Attempt to use ggplot to make the figure
+```{r}
+beta_df<- data.frame(distance_to_centroid=betad1$distances, group=betad1$group)
+
+#rearrange the order of the Description
+order_group<- list("D", "C", "B", "A")
+
+beta_df$group<- factor(beta_df$group, level=order_group)
+
+boxplot_betad<- ggplot(data=beta_df, aes(x=group, y=distance_to_centroid, fill = group)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_grey(start=0.8, end=0.1) +
+  ylab("Distance to centroid") +
+  xlab("")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = rel(1.5))) + 
+  theme(axis.text.x = element_text(size = rel(1.5))) + 
+  theme(legend.position = "none") +
+  theme(legend.box = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size=rel(1)))+
+  guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+
+print(boxplot_betad)
+```
+
+Using vectors - the eigenvectors of the PCoA
+Following https://stackoverflow.com/questions/23463324/r-add-centroids-to-scatter-plot
+https://stackoverflow.com/questions/47516448/how-to-get-ordispider-like-clusters-in-ggplot-with-nmds
+
+```{r}
+# Prepare and tidy the dataframe
+beta_df1<- data.frame(vectors=betad1$vectors, centroid=betad1$centroids,group=betad1$group) %>%
+  rownames_to_column("SampleID")
+
+group2 <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID", "SampleType","Description4","Swale","Year") %>%
+    mutate_if(is.factor, as.character) %>%
+    unite (id, Description4:Year, sep = "_")
+
+# combine dispersion df with sample data
+beta_df1<- left_join(beta_df1, group2, by = "SampleID")
+
+# compute the group centroids
+# which are the mean coordinate on each axis, groupwise
+gg <- merge(beta_df1,aggregate(cbind(mean.x=vectors.PCoA1,mean.y=vectors.PCoA2)~group,beta_df1,mean),by="group")
+
+# calculate the percent of variance of each dimension
+# to indicate on the x and y axis
+labs<- paste("Dimension", 1:4, "(",
+               round(100*betad1$eig / sum(betad1$eig), 2), "%)")
+
+# plot 
+plot_betad<- ggplot(gg, aes(x=vectors.PCoA1, y=vectors.PCoA2, color=factor(group)))+
+  geom_point(size=3)+
+  geom_point(aes(x=mean.x,y=mean.y),size=5)+
+  geom_segment(aes(x=mean.x, y=mean.y, xend=vectors.PCoA1, yend=vectors.PCoA2))+ #use this to draw spider, xend and yend aes will be the centroids
+  #stat_ellipse()+
+  geom_text_repel (label = gg$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+  scale_color_grey() +
+  xlab(labs[1]) +
+  ylab(labs[2]) +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = rel(1.5))) + 
+  theme(axis.text.x = element_text(size = rel(1.5))) + 
+  theme(legend.position = "top", legend.box = "vertical") +
+  theme(legend.box = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size=rel(1)))+
+  guides(col = guide_legend(title.position = "top", ncol = 4, nrow = 1, byrow = TRUE))
+
+print(plot_betad)
+  
+```
+Save plot as grid
+```{r}
+grid_betad<- ggarrange(boxplot_betad,
+                       plot_betad,
+                       #labels = c("A","B","C"),
+                        align = "hv", 
+                        ncol = 2, nrow =1,
+                        #common.legend = TRUE,
+                        legend = "top",
+                        font.label = list(size=20))
+
+#    grid_betad
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_betad.pdf", grid_betad, height = 15, width = 30, dpi = 300)
+```
+
+try to do betadispersion for A-B and C-D
+```{r}
+to_run<- c(3,4)
+betad2<- list()
+anvB2<- list()
+permB2<- list()
+  
+for (i in 1:length(to_run)+2) {
+  stat_b <- list_layers1$ps[[i]]
+  
+  # define the group to test
+  groups2<- factor(stat_b@sam_data$SampleType)
+  
+  ps_bray2<- phyloseq::distance(stat_b, method="bray")
+
+
+  #calculate multivariate dispersion i.e. average distance to median
+  betad2[[i]]<- betadisper(ps_bray2, groups2, type=c("median"))
+  
+  # perform test to see if the group dispersion are homogenous i.e. not significant p-value
+  anvB2[[i]]<- anova(betad2[[i]])
+
+  # permutation test for F
+  permB2[[i]]<- permutest(betad2[[i]], permutation=9999, pair=TRUE)
+
+  cat(str_c("\nBray-Curtis - ", list_layers1$title[[i]], "\n========== \n"))
+  print(betad2[[i]])
+  print(anvB2[[i]])
+  print(permB2[[i]])
+  
+  }
+```
+
+Look at the dispersion between A-B and C-D
+```{r}
+# define the group to test
+  groups3<- factor(ps_trans_all@sam_data$SampleType4)
+  
+  ps_bray3<- phyloseq::distance(ps_trans_all, method="bray")
+
+
+  #calculate multivariate dispersion i.e. average distance to median
+  betad3<- betadisper(ps_bray3, groups3, type=c("median"))
+  betad3
+  
+  # perform test to see if the group dispersion are homogenous i.e. not significant p-value
+  anvB3<- anova(betad3)
+  anvB3
+  
+  # permutation test for F
+  permB3<- permutest(betad3, permutation=9999, pair=TRUE)
+  permB3
+```
+
+```{r}
+beta_df3<- data.frame(distance_to_centroid=betad3$distances, group=betad3$group)
+
+#rearrange the order of the Description
+order_group3<- list("B1", "A1")
+
+beta_df3$group<- factor(beta_df3$group, level=order_group3)
+
+boxplot_betad3<- ggplot(data=beta_df3, aes(x=group, y=distance_to_centroid, fill = group)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_grey(start=0.8, end=0.1) +
+  ylab("Distance to centroid") +
+  xlab("")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = rel(1.5))) + 
+  theme(axis.text.x = element_text(size = rel(1.5))) + 
+  theme(legend.position = "none") +
+  theme(legend.box = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size=rel(1)))+
+  guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+
+print(boxplot_betad3)
+```
+
+Using vectors - the eigenvectors of the PCoA
+Following https://stackoverflow.com/questions/23463324/r-add-centroids-to-scatter-plot
+https://stackoverflow.com/questions/47516448/how-to-get-ordispider-like-clusters-in-ggplot-with-nmds
+
+```{r}
+# Prepare and tidy the dataframe
+beta_df_3<- data.frame(vectors=betad3$vectors, centroid=betad3$centroids, group=betad3$group) %>%
+  rownames_to_column("SampleID")
+
+group3 <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID", "SampleType","Description4","Swale","Year") %>%
+    mutate_if(is.factor, as.character) %>%
+    unite (id, Description4:Year, sep = "_")
+
+# combine dispersion df with sample data
+beta_df_3<- left_join(beta_df_3, group3, by = "SampleID")
+
+# compute the group centroids
+# which are the mean coordinate on each axis, groupwise
+gg3 <- merge(beta_df_3,aggregate(cbind(mean.x=vectors.PCoA1,mean.y=vectors.PCoA2)~group,beta_df_3,mean),by="group")
+
+# calculate the percent of variance of each dimension
+# to indicate on the x and y axis
+labs3<- paste("Dimension", 1:4, "(",
+               round(100*betad3$eig / sum(betad3$eig), 2), "%)")
+
+# plot 
+plot_betad3<- ggplot(gg3, aes(x=vectors.PCoA1, y=vectors.PCoA2, color=factor(group)))+
+  geom_point(size=3)+
+  geom_point(aes(x=mean.x,y=mean.y),size=5)+
+  geom_segment(aes(x=mean.x, y=mean.y, xend=vectors.PCoA1, yend=vectors.PCoA2))+ #use this to draw spider, xend and yend aes will be the centroids
+  #stat_ellipse()+
+  geom_text_repel (label = gg3$id, size = 5, box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"))+
+  scale_color_grey() +
+  xlab(labs3[1]) +
+  ylab(labs3[2]) +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = rel(1.5))) + 
+  theme(axis.text.x = element_text(size = rel(1.5))) + 
+  theme(legend.position = "top", legend.box = "vertical") +
+  theme(legend.box = "horizontal",
+        legend.title = element_blank(),
+        legend.text = element_text(size=rel(1)))+
+  guides(col = guide_legend(title.position = "top", ncol = 4, nrow = 1, byrow = TRUE))
+
+print(plot_betad3)
+  
+```
+
+Save plot as grid
+```{r}
+grid_betad3<- ggarrange(boxplot_betad3,
+                       plot_betad3,
+                       #labels = c("A","B","C"),
+                        align = "hv", 
+                        ncol = 2, nrow =1,
+                        #common.legend = TRUE,
+                        legend = "top",
+                        font.label = list(size=20))
+
+#    grid_betad3
+  ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_betad_sampletype4.pdf", grid_betad3, height = 15, width = 30, dpi = 300)
+```
+
+### 5.3.4 ANOSIM
+If you have very different group sizes or different group beta dispersions, you may consider analysis of similarities (ANOSIM) instead of PERMANOVA. This test does not assume equal group variances. However, it only allows simple 1 variable models with no interactions and can only be used for categorical (AgeGroup), not continuous (ADG) variables.
+https://rstudio-pubs-static.s3.amazonaws.com/330760_8bba830836324bf6b100d4e76f49e3d2.html#beta-diversity
+
+
+The ANOSIM statistic compares the mean of ranked dissimilarities between groups to the mean of ranked dissimilarities within groups. An R value close to "1.0" suggests dissimilarity between groups while an R value close to "0" suggests an even distribution of high and low ranks within and between groups. R values below "0" suggest that dissimilarities are greater within groups than between groups. See Clarke and Gorley (2001) for a guide to interpreting ANOSIM R values.
+```{r}
+#calculate bray curtis distance matrix
+        bray_swale<- phyloseq::distance(ps_trans_all, method="bray")
+        
+        # make a dataframe from the sample_data
+        sampledf<- data.frame(sample_data(ps_trans_all))
+        
+        #anosim test
+        anosim(bray_swale, sampledf$SampleType, permutations = 999)
+```
+
+```{r}
+anosim_separate <- list()
+
+     for (i in 1:length(list_layers2$ps)) {
+        
+        stat_permanova <- list_layers2$ps[[i]]
+  
+        bray_swale<- phyloseq::distance(stat_permanova, method="bray")
+        
+        # make a dataframe from the sample_data
+        sampledf<- data.frame(sample_data(stat_permanova))
+        
+        #anosim test
+        anosim_separate[[i]]<- anosim(bray_swale, sampledf$SampleType, permutations = 999)
+        
+        cat(str_c("\nBray-Curtis - ", list_layers2$title[[i]], "\n========== \n"))
+  print(anosim_separate[[i]])
+    }
+    
+```
+
+### 5.3.5 Bray-curtis matrix
+#### 5.3.3.4 bray curtis matrix
+script modified from https://github.com/joey711/phyloseq/issues/714
+```{r}
+  bray_swale1<- phyloseq::distance(ps_trans_all, method="bray")
+
+  bray_swale1_m <- melt(as.matrix(bray_swale1))
+
+  # remove self-comparison
+  bray_swale1_m <- bray_swale1_m %>%
+    filter(as.character(Var1) !=as.character(Var2)) %>%
+    mutate_if(is.factor, as.character)
+  
+  # get sample data
+  sd <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID","SampleType") %>%
+    mutate_if(is.factor, as.character)
+
+  # combine distance with sample data
+  colnames(sd) = c("Var1", "SampleType")
+  bray_sd<- left_join(bray_swale1_m, sd, by = "Var1") %>%
+    rename("Type1" = SampleType)
+  
+  colnames(sd) = c("Var2", "SampleType")
+  bray_sd<- left_join(bray_sd, sd, by = "Var2") %>%
+    rename("Type2" = SampleType)
+  
+# add variable for plotting purpose
+sd2 <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID","Description4","Depth_cm","Swale","Year") %>%
+    mutate_if(is.factor, as.character)
+
+  # combine distance with sample data
+  colnames(sd2) = c("Var1", "Description4", "Depth_cm", "Swale", "Year")
+  bray_sd2<- left_join(bray_sd, sd2, by = "Var1") %>%
+    mutate(value2 = 1-value) %>%
+    unite (id, Swale:Year, sep = "_")
+
+```
+  
+Create two violin plot 
+1. differences between post and sand
+2. differences between A-B and C-D
+3. differences between sand and mud, and within sand and within mud
+
+```{r}
+# combine matrix with sample data
+ sd3 <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID","Description4") %>%
+    mutate_if(is.factor, as.character)
+
+  colnames(sd3) = c("Var2", "Description4_2")
+  bray_sd2_test<- left_join(bray_sd2, sd3, by = "Var2")
+  
+  
+  bray_sd2_test$Descp3 <- ifelse (bray_sd2_test$Description4 =="PostSandsheet A" & bray_sd2_test$Description4_2 =="Sandsheet A", "A1",
+  ifelse (bray_sd2_test$Description4 =="Sandsheet A" & bray_sd2_test$Description4_2 =="PostSandsheet A", "A1",                                
+  ifelse(bray_sd2_test$Description4 =="Sandsheet A" & bray_sd2_test$Description4_2 =="PreSandsheet A", "A2",
+  ifelse(bray_sd2_test$Description4 =="PreSandsheet A" & bray_sd2_test$Description4_2 =="Sandsheet A", "A2",       
+   ifelse(bray_sd2_test$Description4 =="Pre_Sandsheet B" & bray_sd2_test$Description4_2 =="Sandsheet B", "B",
+   ifelse(bray_sd2_test$Description4 =="Sandsheet B" & bray_sd2_test$Description4_2 =="Pre_Sandsheet B", "B",       
+    ifelse(bray_sd2_test$Description4 =="Pre_Sandsheet C" & bray_sd2_test$Description4_2 =="Sandsheet C", "C",
+    ifelse(bray_sd2_test$Description4 =="Sandsheet C" & bray_sd2_test$Description4_2 =="Pre_Sandsheet C", "C",       
+    ifelse(bray_sd2_test$Description4 =="Pre_Sandsheet D" & bray_sd2_test$Description4_2 =="Sandsheet D", "D",
+    ifelse(bray_sd2_test$Description4 =="Sandsheet D" & bray_sd2_test$Description4_2 =="Pre_Sandsheet D", "D",       
+           "E"))))))))))
+  
+bray_sd2_test
+```
+
+  
+```{r}
+bray_sd2_test<- bray_sd2_test %>% subset(!(Descp3 == "E"))
+
+violine1<- ggplot(bray_sd2_test, aes(x=Descp3, y=value2, fill=Descp3)) +
+  geom_violin(trim=FALSE) +
+  stat_summary(fun.y = mean, geom="point", size=2, color="black") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent)+
+  scale_fill_grey() +
+  ylab("Dissimilarity (%)") +
+  theme(legend.position = "none")
+
+violine1
+```
+  
+2. differences between A-B and C-D
+
+```{r}
+# combine matrix with sample data
+ sd4 <- phyloseq::get_variable(ps_trans_all) %>% 
+  rownames_to_column("SampleID") %>%
+    dplyr::select("SampleID","SampleType4") %>%
+    mutate_if(is.factor, as.character)
+
+  colnames(sd4) = c("Var2", "SampleType4_2")
+  bray_sd2_test<- left_join(bray_sd2, sd4, by = "Var2")
+  
+  colnames(sd4) = c("Var1", "SampleType4")
+  bray_sd2_test<- left_join(bray_sd2_test, sd4, by = "Var1")
+  
+  bray_sd2_test$samTy4 <- ifelse (bray_sd2_test$SampleType4 =="A1" & bray_sd2_test$SampleType4_2 =="A1", "A1",
+  ifelse (bray_sd2_test$SampleType4 =="B1" & bray_sd2_test$SampleType4_2 =="B1", "B1", 
+  ifelse (bray_sd2_test$SampleType4 =="A1" & bray_sd2_test$SampleType4_2 =="B1", "C1", 
+  ifelse (bray_sd2_test$SampleType4 =="B1" & bray_sd2_test$SampleType4_2 =="A1", "C1", "E"))))              
+  
+bray_sd2_test
+```
+```{r}
+bray_sd2_test<- bray_sd2_test %>% subset(!(samTy4 == "E"))
+
+violine2<- ggplot(bray_sd2_test, aes(x=samTy4, y=value2, fill=samTy4)) +
+  geom_violin(trim=FALSE) +
+  stat_summary(fun.y = mean, geom="point", size=2, color="black") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent)+
+  scale_fill_grey() +
+  ylab("Dissimilarity (%)") +
+  theme(legend.position = "none")
+
+violine2
+```
+
+
+## 4.7 Differential expression (DESeq2)
+
+Love, M.I., Huber, W. & Anders, S. 2014. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biol. 15:550.
+
+Follow:
+https://joey711.github.io/phyloseq-extensions/DESeq2.html
+https://bioconductor.org/packages/devel/bioc/vignettes/phyloseq_palaeo/inst/doc/phyloseq-mixture-models.html
+Start from raw counts (not normalized) : ps_all_raw
+
+```{r}
+library("DESeq2")
+packageVersion("DESeq2")
+```
+
+Block 1 is need to avoid the following error > Error in estimateSizeFactorsForMatrix(counts(object), locfunc = locfunc, : every gene contains at least one zero, cannot compute log geometric means
+
+See: https://github.com/joey711/phyloseq_palaeo/issues/387
+
+
+### 4.7.1 Run the following for the theme to plot DESeq2
+```{r}
+#' @title theme_dviz_grid()
+#'
+#' @description  grid lines along major axis ticks, no axes - ggplot theme taken from https://github.com/clauswilke/dataviz/blob/master/R/themes.R
+#' @export
+# grid lines along major axis ticks, no axes
+theme_dviz_grid <- function(font_size = 14, font_family = "") {
+  color = "grey60"
+  line_size = 0.5
+
+  # Starts with theme_cowplot and then modify some parts
+  cowplot::theme_cowplot(font_size = font_size, font_family = font_family) %+replace%
+    theme(
+      # make horizontal grid lines
+      panel.grid.major   = element_line(color = color,
+                                        size = line_size),
+      panel.grid.minor   = element_line(color = color,
+                                        size = line_size),
+
+      # adjust axis tickmarks
+      axis.ticks        = element_line(colour = color, size = line_size),
+
+      # no x or y axis lines
+      axis.line.x       = element_blank(),
+      axis.line.y       = element_blank()
+    )
+}
+```
+
+
+### 4.7.2 plot Deseq
+```{r}
+deseq_data <- ps_swales
+  
+diagdds = phyloseq_to_deseq2(deseq_data, ~SampleType)
+
+# Block 1 Start Estimate geometric mean with zeros
+
+gm_mean = function(x, na.rm = TRUE) {
+    exp(sum(log(x[x > 0]), na.rm = na.rm)/length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+
+# Block 1 end
+
+diagdds = DESeq(diagdds, fitType = "local")
+
+res = results(diagdds, cooksCutoff = FALSE)
+alpha = 0.001
+sigtab = res[which(res$padj < alpha), ]
+summary(sigtab)
+
+# order sigtab according to adjusted pvalue and get the top 90
+sigtab <- sigtab[order(sigtab$padj), ]
+#sigtab <- sigtab[1:90, ]
+
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(deseq_data)[rownames(sigtab),], "matrix"))
+    head(sigtab)
+
+sigtab_plot <- sigtab %>% 
+  rownames_to_column(var = "asv_code") %>%
+#  top_n(-90, wt = asv_code) %>%
+  mutate(label = case_when(Kingdom == "Eukaryota" ~ str_c(asv_code, Class, Genus, sep = "_"), TRUE ~ str_c(asv_code, Class, Genus, sep = "_")), supergroup_label = str_c(str_sub(Kingdom, 1, 1), Phylum, sep = "_")) %>%
+  arrange(dplyr::desc(asv_code)) %>% 
+  rowid_to_column()
+
+saveRDS(sigtab_plot, file = str_c("../phyloseq_palaeo/fig_swale_2_diff_col_v2/sigtab_deseq_palaeo.rds"))
+
+# to get the colour name from viridis color map
+viridis(n=17, option="C")
+
+#change x-axis labeling from label to asv_code
+g <- ggplot(sigtab_plot, aes(x = reorder(label, log2FoldChange), y = log2FoldChange, 
+    color = Phylum, alpha = log(rowid))) + 
+  theme_dviz_grid() + 
+  geom_point(size = 6) + 
+  theme(axis.text.x = element_text(size = 5, angle = 0, hjust = 0.5, vjust = 0.5), 
+        axis.title.x = element_text(size = 20), axis.text.y = element_text(size = 16, 
+            angle = 0, hjust = 0, vjust = 0.5), legend.title = element_text(size = 24), 
+        legend.text = element_text(size = 20), 
+        panel.grid.major.y   = element_line(color = "grey60", size = 0.5),
+        panel.grid.minor.y   = element_line(color = "grey60", size = 0.5))+ 
+  theme(legend.position = "top", legend.box = "vertical") + guides(fill = guide_legend(title.position = "top", 
+        ncol = 6, nrow =3 , byrow = FALSE))+
+  theme(plot.margin = unit(c(1, 5, 1, 5), "cm")) + #top, right, bottom, left
+  ggtitle(list_swales$title[[1]]) +
+  guides(alpha = FALSE) + 
+  ylab("log2 fold change - non-tsunami <--> tsunami") + 
+  xlab("") + 
+  scale_color_viridis_d(option = "C", name = "Phylum") + 
+  coord_flip()
+
+        
+        
+        print(g)
+        
+    
+```
+
+
+```{r}
+ggsave(filename = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_palaeo.pdf", g, height = 20, width = 20, dpi = 300)
+
+```
+
+### 4.7.3 plot Deseq - SampleType4
+Differences between A-B and C-D
+```{r}
+diagdds2 = phyloseq_to_deseq2(ps_swales, ~SampleType4)
+
+# Block 1 Start Estimate geometric mean with zeros
+
+gm_mean = function(x, na.rm = TRUE) {
+    exp(sum(log(x[x > 0]), na.rm = na.rm)/length(x))
+}
+geoMeans2 = apply(counts(diagdds2), 1, gm_mean)
+diagdds2 = estimateSizeFactors(diagdds2, geoMeans = geoMeans2)
+
+# Block 1 end
+
+diagdds2 = DESeq(diagdds2, fitType = "local")
+
+res2 = results(diagdds2, cooksCutoff = FALSE)
+alpha = 0.001
+sigtab2 = res[which(res2$padj < alpha), ]
+summary(sigtab2)
+
+# order sigtab according to adjusted pvalue and get the top 90
+sigtab2 <- sigtab2[order(sigtab2$padj), ]
+#sigtab <- sigtab[1:90, ]
+
+sigtab2 = cbind(as(sigtab2, "data.frame"), as(tax_table(ps_swales)[rownames(sigtab2),], "matrix"))
+    head(sigtab2)
+
+sigtab_plot2 <- sigtab2 %>% 
+  rownames_to_column(var = "asv_code") %>%
+#  top_n(-90, wt = asv_code) %>%
+  mutate(label = case_when(Kingdom == "Eukaryota" ~ str_c(asv_code, Class, Genus, sep = "_"), TRUE ~ str_c(asv_code, Class, Genus, sep = "_")), supergroup_label = str_c(str_sub(Kingdom, 1, 1), Phylum, sep = "_")) %>%
+  arrange(dplyr::desc(asv_code)) %>% 
+  rowid_to_column()
+
+saveRDS(sigtab_plot2, file = str_c("../phyloseq_palaeo/fig_swale_2_diff_col_v2/sigtab_deseq_palaeo_sampleType2.rds"))
+
+# to get the colour name from viridis color map
+viridis(n=17, option="C")
+
+#change x-axis labeling from label to asv_code
+g2 <- ggplot(sigtab_plot2, aes(x = reorder(label, log2FoldChange), y = log2FoldChange, 
+    color = Phylum, alpha = log(rowid))) + 
+  theme_dviz_grid() + 
+  geom_point(size = 6) + 
+  theme(axis.text.x = element_text(size = 5, angle = 0, hjust = 0.5, vjust = 0.5), 
+        axis.title.x = element_text(size = 20), axis.text.y = element_text(size = 16, 
+            angle = 0, hjust = 0, vjust = 0.5), legend.title = element_text(size = 24), 
+        legend.text = element_text(size = 20), 
+        panel.grid.major.y   = element_line(color = "grey60", size = 0.5),
+        panel.grid.minor.y   = element_line(color = "grey60", size = 0.5))+ 
+  theme(legend.position = "top", legend.box = "vertical") + guides(fill = guide_legend(title.position = "top", 
+        ncol = 6, nrow =3 , byrow = FALSE))+
+  theme(plot.margin = unit(c(1, 5, 1, 5), "cm")) + #top, right, bottom, left
+  ggtitle(list_swales$title[[1]]) +
+  guides(alpha = FALSE) + 
+  ylab("log2 fold change - non-tsunami <--> tsunami") + 
+  xlab("") + 
+  scale_color_viridis_d(option = "C", name = "Phylum") + 
+  coord_flip()
+
+        
+        
+        print(g2)
+        
+```
+
+
+
+```{r}
+ggsave(filename = "../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_palaeo_SampleType4.pdf", g2, height = 20, width = 20, dpi = 300)
+
+```
+
+### 4.7.8 Heatmap
+
+#### 4.7.8.1 Load required library
+```{r}
+#install.packages("wesanderson")
+library("wesanderson")    # colour palette for heatmap
+ # names(wes_palettes) #view all palettes
+library("gplots")         # to load heatmap.2
+
+```
+
+
+This is a good tutorial to follow
+https://sebastianraschka.com/Articles/heatmaps_in_r.html
+
+In heatmap.2, it only accept matrix to plot the figure.  
+The tricky part of plotting heatmap is to make the right matrix. My strategies is play around with colname and rowname of a matrix.
+
+Reload the deseq result output from previous section
+```{r}
+  sigtab_pt<- readRDS(file("../phyloseq_palaeo/fig_swale_2_diff_col_v2/sigtab_deseq_palaeo.rds"))
+
+  sigtab_pt2<- readRDS(file("../phyloseq_palaeo/fig_swale_2_diff_col_v2/sigtab_deseq_palaeo_sampleType2.rds"))
+  
+```
+
+#### 4.7.8.2 Plotting
+###### plot both swale X and Y
+```{r}
+#  ========================================
+#  Create dataframe to plot 
+#  ======================================== 
+# filter the data
+deseq_asv<- prune_taxa(sigtab_pt$asv_code, ps_swales)
+summary(deseq_asv@tax_table) #to check if I saved the right data
+
+#change into dataframe 
+df_asv<- data.frame(t(otu_table(deseq_asv)), stringsAsFactors = FALSE) %>% rownames_to_column(var="sample")
+
+metadata_deseq_asv <- data.frame(sample_data(deseq_asv), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+
+df_asv_merged <- left_join(df_asv, metadata_deseq_asv, by="sample")
+
+
+#add phylum to asv code and use it as colname for the matrix
+asv_taxa <- data.frame(t(tax_table(deseq_asv)), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+phylum_pt<- asv_taxa[2,2:length(asv_taxa)]
+class_pt<- asv_taxa[3,2:length(asv_taxa)]
+genus_pt<- asv_taxa[5,2:length(asv_taxa)]
+
+asv_code<- colnames(df_asv_merged[,2:length(asv_taxa)])
+
+#cnames_pt<- str_c(asv_code, class_pt, genus_pt, sep = "_")
+cnames_pt<- str_c(asv_code, phylum_pt, sep="_")
+
+rnames_pt<- df_asv_merged$SampleType
+# heatmap only works for matrix, store SampleType in first column
+# rnames<- merged_india[,139] # store SampleType in col139 as variables rnames
+mat_data_pt<- data.matrix(df_asv_merged[,2:length(asv_taxa)]) # transform numerical data in df_asv_india_merged (col2 to col139 into a matrix and assign to a new variable mat_data)
+#use df_asv_india_merged[,2:139] to check
+
+rownames(mat_data_pt)<- rnames_pt #assign first column of the matrix as rnames
+colnames(mat_data_pt)<- cnames_pt #assign the first row of the matrix as cnames
+
+#calculate as relative abundances
+#the absolute number of observances become a fraction of the total observance in that sample
+mat_data_pt<- scale(mat_data_pt, center=FALSE, scale=colSums(mat_data_pt))
+#transpose so I can lable asv on the left instead of bottom
+mat_data_pt<- t(mat_data_pt)
+
+#  ========================================
+#  Setup color for the heatmap
+#  ======================================== 
+# create diverging color mapping function
+# colorRampPalette only work with RGB
+#scalecol<- colorRampPalette(colors=c("tomato","white","midnightblue"))(101) #number at the end corresponds to the number of colors generated
+
+# create colour range for the heatmap
+ col_breaks_pt = c(seq(0,0.49, length.out=10),
+               seq(0.5, 0.8, lenght.out=10),
+               seq(0.81, 0.99, lenght.out=10))
+
+#create the mid point at 0.04, the output from mean(mat_data)
+#use quantile(mat_data_pt) to know the output at respective quantile
+# > quantile(mat_data_pt, na.rm=FALSE)
+#      0%     25%     50%     75%    100% 
+# 0.00000 0.00000 0.00000 0.00000 0.74042 
+
+#length(col_breaks_pt) #number of color need to 1 less than the length of the break
+
+pal_pt <- wes_palette("Zissou1", 11, type = "continuous")
+pal_pt <- as.character(pal_pt)
+
+# using monochrome palettes 
+#library(RColorBrewer)
+#grey8mono = c("#000000","#252525", "#525252", "#737373", "#969696", "#BDBDBD", "#D9D9D9", "#F0F0F0")
+#scalecol<- grey8mono
+
+
+#denote different groupings of the samples with different colour
+#the last colour black is to color if all failed
+color_map_pt<- ifelse (colnames(mat_data_pt)=="Soil and terrestrial samples", "#97B384",
+                    ifelse (colnames(mat_data_pt)=="Tsunami deposit", "#DEC447",
+                            ifelse (colnames(mat_data_pt)=="Storm deposit", "#CF6D2D",
+                                    "black")))
+
+#  Denote each phylum with different color 
+qual_col <- c("#457291", "#CF6D2D", "#97B384", "#DEC447", "#1E4650", "#8B4452", "#5BA2C9", "#F2A86A", "#96C5B1", "#D2C3EC")
+
+# convert existing colour palette into RGB
+getPalette = colorRampPalette(qual_col) 
+
+phylumList = unique(tax_table(ps_swales)[, "Phylum"])
+phylumPalette = getPalette(length(phylumList))
+names(phylumPalette) = phylumList
+
+# assign phylumPalette to asv_code
+df_phylumPalette <- as.data.frame(phylumPalette, stringsAsFactors = FALSE) %>% rownames_to_column(var="Phylum")
+
+t_phylum <- as.data.frame(t(phylum_pt)) 
+names(t_phylum)[names(t_phylum) == '2'] <- 'Phylum'
+
+df_phylumPalette_merged <- left_join(t_phylum, df_phylumPalette, by="Phylum")
+
+# extract the palette
+color_phylum<- as.character(df_phylumPalette_merged$phylumPalette)
+
+
+#  ========================================
+#   Create dendrogram
+#  ========================================
+# define the distance and cluster based on our matrix data and method
+# for row
+distance_pt<- dist(mat_data_pt, method = "euclidean")
+cluster_pt<- hclust(distance_pt, method = "ward")
+
+#for column
+t.distance_pt <- dist(t(mat_data_pt), method = "euclidean")
+t.cluster_pt <- hclust(t.distance_pt, method = "ward") 
+
+
+
+#  ========================================
+#  Plotting
+#  ======================================== 
+
+pdf("../phyloseq_palaeo/fig_swale_2_diff_col_v2/deseq_pt3.pdf", 
+    width=3, height=6, pointsize = 8)
+
+heatmap.2(mat_data_pt,
+         Rowv = as.dendrogram(cluster_pt), #allow dendrograms
+         Colv = as.dendrogram(t.cluster_pt),
+         #cellnote = mat_data,
+         scale = "none", #data scaling
+         trace = "none",
+         col = pal_pt,
+         breaks = col_breaks_pt,
+         symm= FALSE,
+         symbreaks = FALSE,
+         ColSideColors = color_map_pt,
+         RowSideColors = color_phylum,
+         cexRow = 0.3, #reduce the font size of the axis
+         cexCol = 0.5,
+         margins = c(9,12), #adjust the amount of white space surrounding your heatmap
+         key = TRUE,
+         key.xlab = "relative abundance",
+         keysize = 1,
+         #density.info = c("none"),
+         #ylab = "SampleType",
+         #xlab = "ASV no.",
+         main = "Significant ASVs for 2004IOT in Phra Thong island"
+          )
+
+dev.off()
+```
+
+try to plot by separating swale X and swale Y
+```{r}
+# filter the data
+deseq_asv<- prune_taxa(sigtab_pt$asv_code, ps_mod)
+summary(deseq_asv@tax_table) #to check if I saved the right data
+
+deseq_asv <- subset_samples(deseq_asv, !(SampleType %in% c("Ocean","Marine sediment","Lagoon","Intertidal","Beach")))
+  cat("\nPhyloseq All \n========== \n")
+deseq_asv
+
+swaleX<- subset_samples(deseq_asv, Swale == "X")
+swaleX <- prune_taxa(taxa_sums(swaleX) > 0, swaleX)
+swaleX
+
+swaleY<- subset_samples(deseq_asv, Swale == "Y")
+swaleY <- prune_taxa(taxa_sums(swaleY) > 0, swaleY)
+swaleY
+
+```
+
+###### plot swaleX
+```{r}
+#change into dataframe 
+df_asvX<- data.frame(t(otu_table(ps_mod_X)), stringsAsFactors = FALSE) %>% rownames_to_column(var="sample")
+
+metadata_deseq_asvX <- data.frame(sample_data(ps_mod_X), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+
+df_asv_mergedX <- left_join(df_asvX, metadata_deseq_asv, by="sample")
+
+
+#add phylum to asv code and use it as colname for the matrix
+asv_taxaX <- data.frame(t(tax_table(ps_mod_X)), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+phylum_X<- asv_taxaX[2,2:length(asv_taxaX)]
+class_X<- asv_taxaX[3,2:length(asv_taxaX)]
+genus_X<- asv_taxaX[5,2:length(asv_taxaX)]
+
+asv_codeX<- colnames(df_asv_mergedX[,2:length(asv_taxaX)])
+
+cnames_X<- str_c(asv_codeX, class_X, genus_X, sep = "_")
+#cnames_pt<- str_c(asv_code_pt, phylum_pt, sep="_")
+
+rnames_X<- df_asv_mergedX$SampleType
+# heatmap only works for matrix, store SampleType in first column
+# rnames<- merged_india[,139] # store SampleType in col139 as variables rnames
+mat_data_X<- data.matrix(df_asv_mergedX[,2:length(asv_taxaX)]) # transform numerical data in df_asv_india_merged (col2 to col139 into a matrix and assign to a new variable mat_data)
+#use df_asv_india_merged[,2:139] to check
+
+rownames(mat_data_X)<- rnames_X #assign first column of the matrix as rnames
+colnames(mat_data_X)<- cnames_X #assign the first row of the matrix as cnames
+
+#calculate as relative abundances
+#the absolute number of observances become a fraction of the total observance in that sample
+mat_data_X<- scale(mat_data_X, center=FALSE, scale=colSums(mat_data_X))
+#transpose so I can lable asv on the left instead of bottom
+mat_data_X<- t(mat_data_X)
+
+pal_pt <- wes_palette("Zissou1", 11, type = "continuous")
+pal_pt <- as.character(pal_pt)
+
+#denote different groupings of the samples with different colour
+#the last colour black is to color if all failed
+color_map_pt<- ifelse (colnames(mat_data_pt)=="Soil and terrestrial samples", "#97B384",
+                    ifelse (colnames(mat_data_pt)=="Tsunami deposit", "#DEC447",
+                            ifelse (colnames(mat_data_pt)=="Storm deposit", "#CF6D2D",
+                                    "black")))
+
+# define the distance and cluster based on our matrix data and method
+# for row
+distance_X<- dist(mat_data_X, method = "euclidean")
+cluster_X<- hclust(distance_X, method = "ward")
+
+#for column
+t.distance_X <- dist(t(mat_data_X), method = "euclidean")
+t.cluster_X <- hclust(t.distance_X, method = "ward") #using UPGMA as 
+
+
+pdf("../phyloseq_palaeo/fig_swale_2_diff_col_v2/deseq_swaleX.pdf", 
+    width=3, height=6, pointsize = 8)
+
+heatmap.2(mat_data_X,
+         Rowv = as.dendrogram(cluster_X), #allow dendrograms
+         Colv = as.dendrogram(t.cluster_X),
+         #cellnote = mat_data,
+         scale = "none", #data scaling
+         trace = "none",
+         col = pal_pt,
+         #breaks = col_breaks_pt,
+         symm= FALSE,
+         symbreaks = FALSE,
+         #ColSideColors = color_map_pt,
+         cexRow = 0.3, #reduce the font size of the axis
+         cexCol = 0.5,
+         margins = c(9,12), #adjust the amount of white space surrounding your heatmap
+         key = TRUE,
+         key.xlab = "relative abundance",
+         keysize = 1,
+         #density.info = c("none"),
+         #ylab = "SampleType",
+         #xlab = "ASV no.",
+         main = "Significant ASVs for 2004IOT in Phra Thong island - Swale X"
+          )
+
+dev.off()
+```
+
+###### plot swaleY
+```{r}
+#change into dataframe 
+df_asvY<- data.frame(t(otu_table(ps_mod_Y)), stringsAsFactors = FALSE) %>% rownames_to_column(var="sample")
+
+metadata_deseq_asvY <- data.frame(sample_data(ps_mod_Y), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+
+df_asv_mergedY <- left_join(df_asvY, metadata_deseq_asv, by="sample")
+
+
+#add phylum to asv code and use it as colname for the matrix
+asv_taxaY <- data.frame(t(tax_table(ps_mod_Y)), stringsAsFactors =FALSE) %>% rownames_to_column(var = "sample")
+
+phylum_Y<- asv_taxaY[2,2:length(asv_taxaY)]
+class_Y<- asv_taxaY[3,2:length(asv_taxaY)]
+genus_Y<- asv_taxaY[5,2:length(asv_taxaY)]
+
+asv_codeY<- colnames(df_asv_mergedY[,2:length(asv_taxaY)])
+
+cnames_Y<- str_c(asv_codeY, class_Y, genus_Y, sep = "_")
+#cnames_pt<- str_c(asv_code_pt, phylum_pt, sep="_")
+
+rnames_Y<- df_asv_mergedY$SampleType
+# heatmap only works for matrix, store SampleType in first column
+# rnames<- merged_india[,139] # store SampleType in col139 as variables rnames
+mat_data_Y<- data.matrix(df_asv_mergedY[,2:length(asv_taxaY)]) # transform numerical data in df_asv_india_merged (col2 to col139 into a matrix and assign to a new variable mat_data)
+#use df_asv_india_merged[,2:139] to check
+
+rownames(mat_data_Y)<- rnames_Y #assign first column of the matrix as rnames
+colnames(mat_data_Y)<- cnames_Y #assign the first row of the matrix as cnames
+
+#calculate as relative abundances
+#the absolute number of observances become a fraction of the total observance in that sample
+mat_data_Y<- scale(mat_data_Y, center=FALSE, scale=colSums(mat_data_Y))
+#transpose so I can lable asv on the left instead of bottom
+mat_data_Y<- t(mat_data_Y)
+
+pal_pt <- wes_palette("Zissou1", 11, type = "continuous")
+pal_pt <- as.character(pal_pt)
+
+#denote different groupings of the samples with different colour
+#the last colour black is to color if all failed
+color_map_pt<- ifelse (colnames(mat_data_pt)=="Soil and terrestrial samples", "#97B384",
+                    ifelse (colnames(mat_data_pt)=="Tsunami deposit", "#DEC447",
+                            ifelse (colnames(mat_data_pt)=="Storm deposit", "#CF6D2D",
+                                    "black")))
+
+# define the distance and cluster based on our matrix data and method
+# for row
+distance_Y<- dist(mat_data_Y, method = "euclidean")
+cluster_Y<- hclust(distance_Y, method = "ward")
+
+#for column
+t.distance_Y <- dist(t(mat_data_Y), method = "euclidean")
+t.cluster_Y <- hclust(t.distance_Y, method = "ward") #using UPGMA as 
+
+
+pdf("../phyloseq_palaeo/fig_swale_2_diff_col_v2/deseq_swaleY.pdf", 
+    width=3, height=6, pointsize = 8)
+
+heatmap.2(mat_data_Y,
+         Rowv = as.dendrogram(cluster_Y), #allow dendrograms
+         Colv = as.dendrogram(t.cluster_Y),
+         #cellnote = mat_data,
+         scale = "none", #data scaling
+         trace = "none",
+         col = pal_pt,
+         #breaks = col_breaks_pt,
+         symm= FALSE,
+         symbreaks = FALSE,
+         #ColSideColors = color_map_pt,
+         cexRow = 0.3, #reduce the font size of the axis
+         cexCol = 0.5,
+         margins = c(9,12), #adjust the amount of white space surrounding your heatmap
+         key = TRUE,
+         key.xlab = "relative abundance",
+         keysize = 1,
+         #density.info = c("none"),
+         #ylab = "SampleType",
+         #xlab = "ASV no.",
+         main = "Significant ASVs for 2004IOT in Phra Thong island - Swale Y"
+          )
+
+dev.off()
+```
+
+## 4.8 Key taxa bar plot
+###4.8.1 Bar plot based on Description
+
+Make custom color palette with 12 colors repeat
+```{r}
+qual_col <- c("#457291", "#CF6D2D", "#97B384", "#DEC447", "#1E4650", "#8B4452", "#5BA2C9", "#F2A86A", "#96C5B1", "#D2C3EC")
+
+#convert existing colour palette into RGB
+getPalette = colorRampPalette(qual_col) 
+phylumList = unique(tax_table(deseq_asv)[, "Phylum"])
+phylumPalette = getPalette(length(phylumList))
+names(phylumPalette) = phylumList
+
+classList = unique(tax_table(deseq_asv)[, "Class"])
+classPalette = getPalette(length(classList))
+names(classPalette) = classList
+
+```
+
+
+```{r}
+#rearrange the order of the Description
+order_description_rev<- list("Pre_Sandsheet D","Sandsheet D", "Pre_Sandsheet C", "Sandsheet C", "Pre_Sandsheet B", "Sandsheet B", "PreSandsheet A", "Sandsheet A", "PostSandsheet A")
+
+  deseq_asv@sam_data$Description4 <- factor(deseq_asv@sam_data$Description4, level=order_description_rev)
+
+  
+```
+
+```{r}
+  ps_type <- deseq_asv
+  
+  array_div_type_phylum <- plot_bar(ps_type, x = "Description4", fill = "Phylum") + 
+    geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack") + 
+   ggtitle(str_c("Phylum level - Deseq output")) + 
+   coord_flip() + 
+    facet_wrap(~Swale, scales = "free") +
+    scale_fill_manual(values = phylumPalette) +
+    scale_color_manual(values = phylumPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+   array_div_type_class <- plot_bar(ps_type, x = "Description4", fill = "Class") + 
+    geom_bar(aes(color = Class, fill = Class), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Class level - Deseq output")) + 
+    coord_flip() + 
+    facet_wrap(~Swale, scales = "free") +
+    scale_fill_manual(values = classPalette) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+  
+  print(array_div_type_phylum)
+  print(array_div_type_class)
+
+```
+
+save plots as grid
+```{r}
+grid_fig_deseq_barplot <-  cowplot::plot_grid(array_div_type_phylum,
+                                              array_div_type_class,
+                                              align="hv",
+                                           # labels=c("A","B", "C", "D"),
+                                           ncol=1, nrow=2, label_size = 12)
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_barplot.pdf", grid_fig_deseq_barplot,
+       height = 20, width = 20, dpi = 300)
+```
+
+### 4.8.2 Do histogram for individual phylum
+Total 8 Phylum from deseq
+```{r}
+
+p <- list()
+
+for (asv_one in sigtab_pt$Phylum) {
+  
+#  ps_one <- prune_taxa(asv_one, deseq_asv[,"asv_one"]) 
+  ps_one <- subset_taxa(deseq_asv, (Phylum %in% asv_one))
+  
+  p[[asv_one]] <- plot_bar(ps_one, x = "Description4", fill = "Class") +
+      geom_bar(aes(color = Class, fill = Class), stat = "identity", position = "stack") + 
+      coord_flip() +
+      facet_wrap(~Swale, scales = "free") +
+    scale_fill_manual(values = classPalette) +
+    scale_color_manual(values = classPalette) +
+    ggtitle(asv_one) + 
+    theme_bw() +
+      theme(axis.text.y = element_text(size = 10)) + 
+      theme(axis.text.x = element_text(size = 8, 
+        angle = 0, hjust = 0.5))
+    
+    print(p[[asv_one]])
+}
+```
+
+```{r}
+#arrange plot in grid and dispatch on multiple pages
+ p_grid<- gridExtra::marrangeGrob(grobs=p, nrow = 4, ncol=2)
+  ggsave(filename='../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_phylum_grid_.pdf', p_grid, height = 20, width =20, dpi = 400)
+```
+
+Do historgam for individual phylum from deseq_sampletype4
+```{r}
+# Prepare the dataset
+deseq_asv2<- prune_taxa(sigtab_plot2$asv_code, ps_swales)
+summary(deseq_asv2@tax_table) #to check if I saved the right data
+
+deseq_asv2 <- subset_samples(deseq_asv2, !(SampleType %in% c("Ocean","Marine sediment","Lagoon","Intertidal","Beach")))
+  cat("\nPhyloseq All \n========== \n")
+deseq_asv2
+```
+
+Make custom color palette with 12 colors repeat
+```{r}
+qual_col <- c("#457291", "#CF6D2D", "#97B384", "#DEC447", "#1E4650", "#8B4452", "#5BA2C9", "#F2A86A", "#96C5B1", "#D2C3EC")
+
+#convert existing colour palette into RGB
+getPalette = colorRampPalette(qual_col) 
+phylumList2 = unique(tax_table(deseq_asv2)[, "Phylum"])
+phylumPalette2 = getPalette(length(phylumList2))
+names(phylumPalette2) = phylumList2
+
+classList2 = unique(tax_table(deseq_asv2)[, "Class"])
+classPalette2 = getPalette(length(classList2))
+names(classPalette2) = classList2
+
+```
+
+
+```{r}
+#rearrange the order of the Description
+order_description_rev<- list("Pre_Sandsheet D","Sandsheet D", "Pre_Sandsheet C", "Sandsheet C", "Pre_Sandsheet B", "Sandsheet B", "PreSandsheet A", "Sandsheet A", "PostSandsheet A")
+
+  deseq_asv2@sam_data$Description4 <- factor(deseq_asv2@sam_data$Description4, level=order_description_rev)
+
+  
+```
+
+```{r}
+
+p2 <- list()
+
+for (asv_one in sigtab_plot2$Phylum) {
+  
+#  ps_one <- prune_taxa(asv_one, deseq_asv[,"asv_one"]) 
+  ps_one <- subset_taxa(deseq_asv2, (Phylum %in% asv_one))
+  
+  p2[[asv_one]] <- plot_bar(ps_one, x = "Description4", fill = "Class") +
+      geom_bar(aes(color = Class, fill = Class), stat = "identity", position = "stack") + 
+      coord_flip() +
+      facet_wrap(~Swale, scales = "free") +
+    scale_fill_manual(values = classPalette2) +
+    scale_color_manual(values = classPalette2) +
+    ggtitle(asv_one) + 
+      theme(axis.text.y = element_text(size = 10)) + 
+      theme(axis.text.x = element_text(size = 8, 
+        angle = 0, hjust = 0.5))
+    
+    print(p2[[asv_one]])
+}
+```
+
+```{r}
+#arrange plot in grid and dispatch on multiple pages
+ p_grid2<- gridExtra::marrangeGrob(grobs=p2, nrow = 4, ncol=2)
+  ggsave(filename='../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_phylum_grid_sampletype4.pdf', p_grid2, height = 20, width =20, dpi = 400)
+```
+
+### 4.8.3 subset Thermodesulfovibrionia
+```{r}
+#subset Thermodesulfovibrionia from ps_mod_X
+ps_deseq_thermosulf <- subset_taxa(deseq_asv, (Class %in% c("Thermodesulfovibrionia")))
+ps_deseq_thermosulf
+
+```
+
+```{r}
+sample_sums(ps_deseq_thermosulf)
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_thermosulf <- plot_bar(ps_deseq_thermosulf, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Thermosulfovibrionia")) + 
+    coord_flip() + 
+    facet_wrap(~Swale, scales = "free") +
+    scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_thermosulf
+```
+
+save plot
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_thermosulf.pdf", barplot_thermosulf, height = 20, width = 20, dpi = 300)
+```
+
+
+### 4.8.4 Thermodesulfovibrio in the overall Phra Thong dataset
+```{r}
+# filter the data
+deseq_asv_all<- prune_taxa(sigtab_pt$asv_code, ps_mod1)
+summary(deseq_asv_all@tax_table) #to check if I saved the right data
+
+```
+
+```{r}
+#subset Thermodesulfovibrionia from ps_mod1 with all the samples
+ps_deseq_all_thermosulf <- subset_taxa(deseq_asv_all, (Class %in% c("Thermodesulfovibrionia")))
+ps_deseq_all_thermosulf
+
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_all_thermosulf <- plot_bar(ps_deseq_all_thermosulf, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Thermosulfovibrionia - all")) + 
+    coord_flip() + 
+    facet_wrap(~Swale, scales = "free") +
+    #scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_all_thermosulf
+```
+
+save plot
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_all_thermosulf.pdf", barplot_all_thermosulf, height = 20, width = 20, dpi = 300)
+```
+
+### 4.8.5 Thermodesulfovibrionia in all Phra Thong and Cuddalore data
+```{r}
+# filter the data
+deseq_asv_PTnCudd<- prune_taxa(sigtab_pt$asv_code, ps_all_raw_)
+summary(deseq_asv_PTnCudd@tax_table) #to check if I saved the right data
+
+```
+
+```{r}
+#subset Thermodesulfovibrionia from ps_mod_X
+ps_deseq_PTnCudd_thermosulf <- subset_taxa(deseq_asv_PTnCudd, (Class %in% c("Thermodesulfovibrionia")))
+ps_deseq_PTnCudd_thermosulf
+
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_PTnCudd_thermosulf <- plot_bar(ps_deseq_PTnCudd_thermosulf, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Thermosulfovibrionia - all")) + 
+    coord_flip() + 
+    facet_wrap(~Venue, scales = "free") +
+    #scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_PTnCudd_thermosulf
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_PTnIndia_thermosulf.pdf", barplot_PTnCudd_thermosulf, height = 20, width = 20, dpi = 300)
+```
+
+
+### 4.8.6 finding general Thermodesulfovibrionia taxa in PT and Cuddalore dataset
+```{r}
+#subset Thermodesulfovibrionia from ps_all_raw
+ps_deseq_PTnCudd_thermos <- subset_taxa(ps_all_raw_, (Class %in% c("Thermodesulfovibrionia")))
+ps_deseq_PTnCudd_thermos
+
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_PTnCudd_thermos <- plot_bar(ps_deseq_PTnCudd_thermos, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Thermodesulfovibrionia - all")) + 
+    #coord_flip() + 
+    facet_wrap(~Venue, scales = "free") +
+    #scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_PTnCudd_thermos
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_barplot_PT_India_thermodesulfovibrionia.pdf", barplot_PTnCudd_thermos, height = 20, width = 20, dpi = 300)
+```
+
+
+```{r}
+#subset Thermoplasmata from ps_all_raw
+ps_deseq_PTnCudd_thermop <- subset_taxa(ps_all_raw_, (Class %in% c("Thermoplasmata")))
+ps_deseq_PTnCudd_thermop
+
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_PTnCudd_thermop <- plot_bar(ps_deseq_PTnCudd_thermop, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Thermoplasmata - all")) + 
+    coord_flip() + 
+    facet_wrap(~SamplingSite, scales = "free") +
+    #scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_PTnCudd_thermop
+```
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_barplot_PT_India_thermoplasmata.pdf", barplot_PTnCudd_thermop, height = 20, width = 20, dpi = 300)
+```
+
+```{r}
+#subset Chitinophagacea from ps_all_raw
+ps_deseq_PTnCudd_chitin <- subset_taxa(ps_all_raw_, (Family %in% c("Chitinophagaceae")))
+ps_deseq_PTnCudd_chitin
+
+```
+
+create a bar plot for this taxa
+```{r}
+barplot_PTnCudd_chitin <- plot_bar(ps_deseq_PTnCudd_chitin, x = "Description4", fill = "Description4") + 
+    geom_bar(aes(fill = Description4), stat = "identity", position = "stack") + 
+    ggtitle(str_c("Chitinophagaceae - all")) + 
+    coord_flip() + 
+    facet_wrap(~SamplingSite, scales = "free") +
+    #scale_fill_manual(values = swales_col) +
+    scale_color_manual(values = classPalette) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 10)) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + 
+    #theme(legend.position = "none", legend.box = "vertical") +
+    theme(legend.box = "horizontal") +
+    theme(legend.text = element_text(size=5))
+    guides(fill = guide_legend(title.position = "top", ncol = 5, nrow = 8, byrow = FALSE))
+    
+    
+barplot_PTnCudd_chitin
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_barplot_PT_India_chitinophagaceae.pdf", barplot_PTnCudd_chitin, height = 20, width = 20, dpi = 300)
+```
+
+
+### 4.8.7 Find PT key taxa in Cuddalore data
+Using the output from DESeq2 analysis and search in Cuddalore dataset.
+The final result output in ../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_phylum_raw_grid_.pdf suggest that there is no ASVs output from PT DESeq2 analysis are found in Cuddalore data.
+
+```{r}
+ps_all_raw_rm1_ <- prune_taxa(taxa_sums(ps_all_raw_) >10, ps_all_raw_)
+ps_all_raw_rm1_ <- subset_samples(ps_all_raw_rm1_, !(Description4 %in% c("Pre_uncertain_palaeotsunami", "Uncertain_Palaeotsunami", "Ocean")))
+ps_all_raw_rm1_ <- subset_samples(ps_all_raw_rm1_, !(Venue == "Palu"))
+
+
+cat("\nPhyloseq All - remove reads below 10 \n========== \n")
+ps_all_raw_rm1_
+
+```
+
+```{r}
+ps_all_raw_rm1_norm <- ps_normalize_median(ps_all_raw_rm1_, "all")
+
+```
+
+```{r}
+# load the output from DESeq analysis
+sigtab_pt<- readRDS(file("../phyloseq_palaeo/fig_swale_2_diff_col_v2/sigtab_deseq_palaeo.rds"))
+
+# filter the data based on DESeq output
+deseq_asv_all_raw<- prune_taxa(sigtab_pt$asv_code, ps_all_raw_rm1_norm)
+summary(deseq_asv_all_raw@tax_table) #to check if I saved the right data
+
+```
+
+Make custom color palette with 12 colors repeat
+```{r}
+qual_col <- c("#457291", "#CF6D2D", "#97B384", "#DEC447", "#1E4650", "#8B4452", "#5BA2C9", "#F2A86A", "#96C5B1", "#D2C3EC")
+
+#convert existing colour palette into RGB
+getPalette = colorRampPalette(qual_col) 
+phylumList_raw = unique(tax_table(deseq_asv_all_raw)[, "Phylum"])
+phylumPalette_raw = getPalette(length(phylumList_raw))
+names(phylumPalette_raw) = phylumList_raw
+
+classList_raw = unique(tax_table(deseq_asv_all_raw)[, "Class"])
+classPalette_raw = getPalette(length(classList_raw))
+names(classPalette_raw) = classList_raw
+
+
+```
+
+
+```{r}
+#rearrange the order of Description4
+order_description_rearrange<- list("Pre_Sandsheet D","Sandsheet D", "Pre_Sandsheet C", "Sandsheet C", "Pre_Sandsheet B", "Sandsheet B", "PreSandsheet A", "Sandsheet A", "PostSandsheet A","Post2007Storm", "2007 Storm", "Pre2007Storm", "Intertidal Sand", "Beach", "Marine sediment", "Intertidal sed.","2004IOT","Aeolian sed.","Cyclone Thane","Topsoil","Lagoon")
+
+  deseq_asv_all_raw@sam_data$Description4 <- factor(deseq_asv_all_raw@sam_data$Description4, level=order_description_rearrange)
+
+```
+
+
+```{r}
+p_raw <- list()
+
+for (asv_one in sigtab_pt$Phylum) {
+  
+  ps_one_raw <- subset_taxa(deseq_asv_all_raw, (Phylum %in% asv_one))
+  
+  p_raw[[asv_one]] <- plot_bar(ps_one_raw, x = "Description4", fill = "Class") +
+      geom_bar(aes(color = Class, fill = Class), stat = "identity", position = "stack") + 
+      coord_flip() +
+      facet_wrap(~Venue, scales = "free") +
+    scale_fill_manual(values = classPalette_raw) +
+    scale_color_manual(values = classPalette_raw) +
+    ggtitle(asv_one) + 
+    theme_bw() +
+      theme(axis.text.y = element_text(size = 10)) + 
+      theme(axis.text.x = element_text(size = 8, 
+        angle = 0, hjust = 0.5))
+    
+    print(p_raw[[asv_one]])
+}
+```
+```{r}
+#arrange plot in grid and dispatch on multiple pages
+ p_raw_grid<- gridExtra::marrangeGrob(grobs=p_raw, nrow = 4, ncol=2)
+  ggsave(filename='../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_phylum_raw_grid_.pdf', p_raw_grid, height = 20, width =20, dpi = 400)
+```
+```{r}
+# select the targetted class
+target<- c("Crenarchaeota_Bathyarchaeia", "Proteobacteria_Deltaproteobacteria","Chloroflexi_Anaerolineae","Latescibacteria__","Calditrichaeota_Calditrichia","Nitrospirae_Thermodesulfovibrionia","Acidobacteria_Acidobacteriia")
+
+target_phylum1 <- c("Crenarchaeota","Proteobacteria","Chloroflexi","Latescibacteria","Calditrichaeota","Nitrospirae","Acidobacteria")
+
+
+# filter the data based on DESeq output
+deseq_asv_all_raw_phylum <- subset_taxa(ps_all_raw_rm1_norm, (Phylum %in% c("Crenarchaeota","Proteobacteria","Chloroflexi","Latescibacteria","Calditrichaeota","Nitrospirae","Acidobacteria")))
+
+deseq_asv_all_raw_phylum
+
+#rearrange the order of Description4
+order_description_rearrange<- list("Pre_Sandsheet D","Sandsheet D", "Pre_Sandsheet C", "Sandsheet C", "Pre_Sandsheet B", "Sandsheet B", "PreSandsheet A", "Sandsheet A", "PostSandsheet A","Post2007Storm", "2007 Storm", "Pre2007Storm", "Intertidal Sand", "Beach", "Marine sediment", "Intertidal sed.","2004IOT","Aeolian sed.","Cyclone Thane","Topsoil","Lagoon")
+
+  deseq_asv_all_raw_phylum@sam_data$Description4 <- factor(deseq_asv_all_raw@sam_data$Description4, level=order_description_rearrange)
+
+# convert existing colour palette into RGB
+getPalette = colorRampPalette(qual_col) 
+phylumList_raw_phylum = unique(tax_table(deseq_asv_all_raw_phylum)[, "Phylum"])
+phylumPalette_raw_phylum = getPalette(length(phylumList_raw_phylum))
+names(phylumPalette_raw_phylum) = phylumList_raw_phylum
+
+classList_raw_phylum = unique(tax_table(deseq_asv_all_raw_phylum)[, "Class"])
+classPalette_raw_phylum = getPalette(length(classList_raw_phylum))
+names(classPalette_raw_phylum) = classList_raw_phylum
+
+# plot the bars
+p_raw_phylum <- list()
+
+for (asv_one1 in target_phylum1) {
+  
+  ps_one_raw_phylum <- subset_taxa(deseq_asv_all_raw_phylum, (Phylum %in% asv_one1))
+  
+  p_raw_phylum[[asv_one1]] <- plot_bar(ps_one_raw_phylum, x = "Description4", fill = "Class") +
+      geom_bar(aes(color = Class, fill = Class), stat = "identity", position = "stack") + 
+      coord_flip() +
+      facet_wrap(~Venue, scales = "free") +
+    scale_fill_manual(values = classPalette_raw_phylum) +
+    scale_color_manual(values = classPalette_raw_phylum) +
+    ggtitle(asv_one1) + 
+    theme_bw() +
+      theme(axis.text.y = element_text(size = 10)) + 
+      theme(axis.text.x = element_text(size = 8, 
+        angle = 0, hjust = 0.5))
+    
+    print(p_raw_phylum[[asv_one1]])
+}
+
+
+
+#arrange plot in grid and dispatch on multiple pages
+ p_raw_grid_phylum<- gridExtra::marrangeGrob(grobs=p_raw_phylum, nrow = 4, ncol=2)
+  ggsave(filename='../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_deseq_phylum_raw_grid_phylum.pdf', p_raw_grid_phylum, height = 20, width =20, dpi = 400)
+
+```
+
+
+
+### 4.8.8 taxa and chemical data
+
+```{r}
+ps_deseq_thermosulf_2<- prune_samples(sample_sums(ps_deseq_thermosulf)>0, ps_deseq_thermosulf)
+cat("\nPhyloseq Thermosulfovibrionia \n========== \n")
+ps_deseq_thermosulf_2
+
+df_thermo<- ps_to_long(ps_deseq_thermosulf_2)
+```
+
+```{r}
+p_chem_thermo <- list()
+chem_to_plot<- c("C", "N", "S")
+
+for (j in 1:length(chem_to_plot)) {
+  
+ p_chem_thermo[[j]]<- ggscatter(df_thermo, x="n_seq", y=chem_to_plot[j], add="reg.line") +
+  stat_cor(label.y=0.1) +
+  #stat_regline_equation(label.y=250)+
+  geom_point(aes(color=Description4), size = 6) +
+  geom_smooth(method="lm", se=TRUE, fullrange=FALSE, level=0.95) + #fit linear model
+  scale_color_manual(values=swales_col) +
+   facet_grid(SampleType~Swale)+
+  labs(title = str_c("Thermosulfovibrionia vs ",chem_to_plot[j])) 
+  #theme_bw() +
+  #theme(axis.text.y = element_text(size = 10)) + 
+  #theme(axis.text.x = element_text(size = 8, 
+  #      angle = 0, hjust = 0.5),
+  #      legend.position = "top", legend.box = "vertical")
+  print(p_chem_thermo[[j]])
+}
+```
+
+
+
+save plots as grid
+```{r}
+grid_fig_taxa_chem2 <-  cowplot::plot_grid(p_chem_thermo[[1]],
+                                           p_chem_thermo[[2]],
+                                           p_chem_thermo[[3]],
+                                           align="hv",
+                                           #labels=c("A","B", "C", "D"),
+                                           ncol=2, nrow=3, 
+                                           label_size = 12)
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_taxa_chem2.pdf", grid_fig_taxa_chem2,
+       height = 20, width = 20, dpi = 300)
+```
+
+
+
+### 4.8.9 Rank abunandan curve
+Note: before loading this library, need to make sure Xquartz is enable or opened.
+```{r}
+install.packages(pkgs=c("BiodiversityR", "vegan",
+             "Rcmdr", "MASS", "mgcv",
+             "cluster", "RODBC", "rpart", "effects", "multcomp",
+             "ellipse", "maptree", "sp", "splancs", "spatial",
+             "akima", "nnet", "dismo", "raster", "rgdal",
+             "bootstrap", "PresenceAbsence",
+             "maxlike", "gbm", "randomForest", "gam", "earth", "mda",
+             "kernlab", "e1071", "glmnet", "sem", "rgl", "relimp",
+             "lmtest", "leaps", "Hmisc", "colorspace", "aplpack",
+             "abind", "XLConnect", "car", "markdown", "knitr",
+             "geosphere", "maptools", "rgeos", "ENMeval", "red"),
+             dependencies=c("Depends", "Imports"))
+
+library(BiodiversityR)
+
+```
+
+
+Convert from phyloseq to regular dataframe
+```{r}
+# BiodiversityR cannot process complex data
+# Make sure the first col starts with the data instead of sample name
+otu_df_1 <- data.frame(phyloseq::otu_table(ps_swales),stringsAsFactors =FALSE)
+otu_df_1_t<- as.data.frame(t(as.matrix(otu_df_1))) 
+    
+metadata_swales_2 <- data.frame(phyloseq::sample_data(ps_swales), stringsAsFactors =FALSE) 
+
+# change character to factor
+metadata_swales_2<- dplyr::mutate_if(metadata_swales_2, is.character, as.factor)
+
+#check if each column is numeric or character or factor
+#sapply(metadata_swales_1, is.numeric)
+#sapply(metadata_swales_1, is.factor)
+
+#keep only factor columns
+#test<- metadata_swales_1[, sapply(metadata_swales_1, is.factor)]
+#str(test)
+
+```
+
+
+```{r}
+# specnames to label selected species
+# do specnames=c(1:10) to label top 10 species
+
+# here I am labelling asvs that were unique to tsunami deposits
+ra.data1<- BiodiversityR::rankabuncomp(x=otu_df_1_t, y=metadata_swales_2, factor='Description4', return.data=TRUE, specnames=c(1:10), legend=FALSE)
+```
+
+
+```{r}
+ps_rank <- ps_swales
+
+otu_df_1 <- data.frame(phyloseq::otu_table(ps_rank),stringsAsFactors =FALSE)
+otu_df_1_t<- as.data.frame(t(as.matrix(otu_df_1))) 
+    
+metadata_swales_2 <- data.frame(phyloseq::sample_data(ps_rank), stringsAsFactors =FALSE) 
+
+# change character to factor
+metadata_swales_2$Description4 <- as.factor(metadata_swales_2$Description4)
+
+
+# here I am labelling asvs that were unique to tsunami deposits
+ra.data1<- BiodiversityR::rankabuncomp(x=otu_df_1_t, y=metadata_swales_2, factor='Description4', return.data=TRUE, specnames=c(1:10), legend=FALSE)
+
+# create a new dataframe containing only the data we want to highlight
+highlight_df1 <- ra.data1 %>% dplyr::filter(ra.data1$species %in% c( "asv_015_00204", "asv_015_01454", "asv_015_01747", "asv_015_01995", "asv_015_02289", "asv_015_03245", "asv_015_03681", "asv_015_04496", "asv_015_02366", "asv_015_00590"))
+
+# filter the data with proportion at 0.1 to look for the rare biosphere. 
+# proportion is calculated based on ASV abundances divided by the grouping total abundances
+# e.g. sum(Cyclone Thane$abundance) = 342000.3
+#     26559.4 / 342000.3 = 0.0776 = 7.8%
+ra.data1_rare<- ra.data1 %>% filter(proportion <= 0.1)
+max(ra.data1_rare$logabun)
+#2.3
+
+ra.data1_rare0.01<- ra.data1 %>% filter(proportion <= 0.01)
+max(ra.data1_rare0.01$logabun)
+# use this value to set geom_hline(yintercept)
+#1.8
+
+plotgg2 <- ggplot(data=ra.data1, aes(x = rank, y = logabun)) + 
+    scale_x_continuous(expand=c(0, 1), sec.axis = dup_axis(labels=NULL, name=NULL)) +
+    scale_y_continuous(expand=c(0, 1), sec.axis = dup_axis(labels=NULL, name=NULL)) +
+    geom_line(aes(colour=Grouping), size=2) +
+    geom_point(data = highlight_df1, aes(x=rank, y=logabun), color="grey3", size=7) + # second geom_point for the new df with data to be highlighted
+    geom_hline(yintercept = 2.3) + # output from max(ra.data1_rare$logabun) filtered with proportion =< 0.1
+    geom_hline(yintercept = 1.8, linetype = 2) +
+    facet_wrap(~Grouping) +
+    labs(x = "rank", y = "abundance (log)", colour = "Description3") +
+    
+   #geom_point(aes(colour=Grouping), position = position_jitter(h=0.2, w=0.2), size=5, alpha=0.6) +
+    #geom_text_repel(data= highlight_df1, aes(label=species), 
+    #    angle=0, nudge_x=1, nudge_y=1, box.padding = 1, show.legend=FALSE) +
+    scale_color_manual(values = swales_col) +
+    expand_limits(x=0, y=0) +
+     theme_bw() +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    theme(legend.position = "top", legend.box = "vertical") +
+    theme(legend.box = "horizontal",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+    
+
+print(plotgg2)
+```
+
+```{r}
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_rank_abund_all.pdf", plotgg2,
+       height = 20, width = 20, dpi = 300)
+
+```
+
+
+Species richness can be viewed as the number of different species on the chart i.e., how many species were ranked. Species evenness is reflected in the slope of the line that fits the graph (assuming a linear, i.e. logarithmic series, relationship). A steep gradient indicates low evenness as the high-ranking species have much higher abundances than the low-ranking species. A shallow gradient indicates high evenness as the abundances of different species are similar.
+
+
+
+## 4.9 Chemical data
+### 4.9.1 Calculate mean and standard deviation
+```{r}
+#+++++++++++++++++++++++++
+# Function to calculate the mean and the standard deviation
+  # for each group
+#+++++++++++++++++++++++++
+# data : a data frame
+# varname : the name of a column containing the variable
+  #to be summariezed
+# groupnames : vector of column names to be used as
+  # grouping variables
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+ return(data_sum)
+}
+```
+
+### 4.9.2 Make barplot
+Transform the dataframe into long format and make the plot
+```{r}
+long_summary_c <- data_summary(long_all, varname="C",
+                             groupnames=c("Description4", "Swale", "SampleType"))
+head(long_summary_c)
+
+```
+
+```{r}
+long_summary_c$Description4 <- factor(long_summary_c$Description4, level=order_description_rev)
+
+```
+
+
+```{r}
+p_carbon<- ggplot(long_summary_c, aes(x=Description4, y=C, fill=Description4)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  #geom_errorbar(aes(ymin=C-sd, ymax=C+sd), width=.2, position=position_dodge(.9)) +
+  coord_flip() +
+  facet_wrap(~Swale, scales = "free")+
+  scale_fill_manual(values = swales_col) +
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+p_carbon
+```
+
+
+```{r}
+box_carb<- ggboxplot(long_summary_c, x="SampleType", y="C",
+              color = "Description4", add = "jitter") +
+  #scale_color_manual(values=c("Soil and terrestrial samples" = "#97B384", "Tsunami deposit"= "#DEC447")) +
+  scale_color_manual(values=swales_col) +
+   #geom_violin() +
+  stat_compare_means(method = "t.test", paired = FALSE) +
+  facet_wrap(~Swale, scales = "free")+
+  labs(title = "Boxplot with t-test p-value (TOC)")+
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+
+box_carb
+```
+
+```{r}
+long_summary_N <- data_summary(long_all, varname="N",
+                             groupnames=c("Description4", "Swale", "SampleType"))
+head(long_summary_N)
+
+long_summary_N$Description4 <- factor(long_summary_N$Description4, level=order_description_rev)
+
+```
+
+
+```{r}
+p_nitro<- ggplot(long_summary_N, aes(x=Description4, y=N, fill=Description4)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  #geom_errorbar(aes(ymin=C-sd, ymax=C+sd), width=.2, position=position_dodge(.9)) +
+  coord_flip() +
+  facet_wrap(~Swale, scales = "free")+
+  scale_fill_manual(values = swales_col) +
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+p_nitro
+```
+
+```{r}
+box_nitro<- ggboxplot(long_summary_N, x="SampleType", y="N",
+              color = "Description4", add = "jitter") +
+  #scale_color_manual(values=c("Soil and terrestrial samples" = "#97B384", "Tsunami deposit"= "#DEC447")) +
+  scale_color_manual(values=swales_col) +
+   #geom_violin() +
+  stat_compare_means(method = "t.test", paired = FALSE) +
+  labs(title = "Boxplot with t-test p-value (TN)")+
+  facet_wrap(~Swale, scales = "free")+
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+
+box_nitro
+```
+
+```{r}
+long_summary_S <- data_summary(long_all, varname="S",
+                             groupnames=c("Description4", "Swale", "SampleType"))
+head(long_summary_S)
+
+long_summary_S$Description4 <- factor(long_summary_S$Description4, level=order_description_rev)
+
+```
+
+
+```{r}
+p_sulf<- ggplot(long_summary_S, aes(x=Description4, y=S, fill=Description4)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  #geom_errorbar(aes(ymin=C-sd, ymax=C+sd), width=.2, position=position_dodge(.9)) +
+  coord_flip() +
+  facet_wrap(~Swale, scales = "free")+
+  scale_fill_manual(values = swales_col) +
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+p_sulf
+```
+
+```{r}
+box_sulf<- ggboxplot(long_summary_S, x="SampleType", y="S",
+              color = "Description4", add = "jitter") +
+  #scale_color_manual(values=c("Soil and terrestrial samples" = "#97B384", "Tsunami deposit"= "#DEC447")) +
+  scale_color_manual(values=swales_col) +
+   #geom_violin() +
+  stat_compare_means(method = "t.test", paired = FALSE) +
+  labs(title = "Boxplot with t-test p-value (TS)")+
+  facet_wrap(~Swale, scales = "free")+
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+box_sulf
+```
+
+```{r}
+grid_fig_chem <-  ggarrange(p_carbon, p_nitro, p_sulf,
+                                     align="hv",
+                                     ncol=1, nrow=3, 
+                                     common.legend = TRUE, legend = "top",
+                                     font.label = list(size=20))
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_chem.pdf", grid_fig_chem,
+       height = 15, width = 20, dpi = 300)
+```
+
+```{r}
+grid_fig_chem_hoz <-  ggarrange(p_carbon, p_nitro, p_sulf,
+                                     align="hv",
+                                     ncol=3, nrow=1, 
+                                     common.legend = TRUE, legend = "top",
+                                     font.label = list(size=20))
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_chem_hoz.pdf", grid_fig_chem_hoz,
+       height = 15, width = 30, dpi = 300)
+```
+
+```{r}
+grid_box_chem <-  ggarrange(box_carb, box_nitro, box_sulf,
+                                     align="hv",
+                                     ncol=3, nrow=1, 
+                                     common.legend = TRUE, legend = "top",
+                                     font.label = list(size=20))
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_chem_t_test.pdf", grid_box_chem,
+       height = 15, width = 20, dpi = 300)
+```
+
+### 4.9.3 T-test
+TOC
+```{r}
+long_summary_c2 <- data_summary(long_all, varname="C",
+                             groupnames=c("Description4", "Swale", "SampleType", "SampleType4"))
+
+#=====================
+# Prepare the data
+# =====================
+# remove Pre_Sandsheet D to have even variables
+# compare sand sheet and organic mud formed after the event
+long_c<- subset(long_summary_c2, !(Description4 %in% c("Pre_Sandsheet D")))
+
+# subset data for each swales
+long_c_x<- subset(long_c, Swale =="X")
+long_c_y<- subset(long_c, Swale =="Y")
+
+
+# =====================
+# Perform 2 sample t-test
+# =====================
+
+long_c_t.test <- t.test(data = long_c, C ~ SampleType, paired=FALSE)
+cat("\nTOC t-test - all \n================== \n")
+long_c_t.test
+
+long_c_t.test2 <- t.test(data = long_c, C ~ SampleType4, paired=FALSE)
+cat("\nTOC t-test - upper VS lower \n================== \n")
+long_c_t.test2
+
+
+long_c_x_t.test <- t.test(data = long_c_x, C ~ SampleType, paired=FALSE)
+cat("\nTOC t-test - swale X \n================== \n")
+long_c_x_t.test
+
+long_c_y_t.test <- t.test(data = long_c_y, C ~ SampleType, paired=FALSE)
+cat("\nTOC t-test - swale Y \n================== \n")
+long_c_y_t.test
+
+```
+TN
+```{r}
+long_summary_N2 <- data_summary(long_all, varname="N",
+                             groupnames=c("Description4", "Swale", "SampleType", "SampleType4"))
+
+# =====================
+# Prepare the data
+# =====================
+# remove Pre_Sandsheet D to have even variables
+# compare sand sheet and organic mud formed after the event
+long_N<- subset(long_summary_N2, !(Description4 %in% c("Pre_Sandsheet D")))
+
+# subset data for each swales
+long_N_x<- subset(long_N, Swale =="X")
+long_N_y<- subset(long_N, Swale =="Y")
+
+
+# =====================
+# Perform 2 sample t-test
+# =====================
+
+long_N_t.test <- t.test(data = long_N, N ~ SampleType, paired=FALSE)
+cat("\nTN t-test - all \n================== \n")
+long_N_t.test
+
+long_N_t.test2 <- t.test(data = long_N, N ~ SampleType4, paired=FALSE)
+cat("\nTN t-test - upper VS lower \n================== \n")
+long_N_t.test2
+
+long_N_x_t.test <- t.test(data = long_N_x, N ~ SampleType, paired=FALSE)
+cat("\nTN t-test - swale X \n================== \n")
+long_N_x_t.test
+
+long_N_y_t.test <- t.test(data = long_N_y, N ~ SampleType, paired=FALSE)
+cat("\nTN t-test - swale Y \n================== \n")
+long_N_y_t.test
+
+```
+
+TS
+```{r}
+long_summary_S2 <- data_summary(long_all, varname="S",
+                             groupnames=c("Description4", "Swale", "SampleType", "SampleType4"))
+
+# =====================
+# Prepare the data
+# =====================
+# remove Pre_Sandsheet D to have even variables
+# compare sand sheet and organic mud formed after the event
+long_S<- subset(long_summary_S2, !(Description4 %in% c("Pre_Sandsheet D")))
+
+# subset data for each swales
+long_S_x<- subset(long_S, Swale =="X")
+long_S_y<- subset(long_S, Swale =="Y")
+
+
+# =====================
+# Perform 2 sample t-test
+# =====================
+
+long_S_t.test <- t.test(data = long_S, S ~ SampleType, paired=FALSE)
+cat("\nTS t-test - all \n================== \n")
+long_S_t.test
+
+long_S_t.test2 <- t.test(data = long_S, S ~ SampleType4, paired=FALSE)
+cat("\nTS t-test - upper VS lower \n================== \n")
+long_S_t.test2
+
+long_S_x_t.test <- t.test(data = long_S_x, S ~ SampleType, paired=FALSE)
+cat("\nTS t-test - swale X \n================== \n")
+long_S_x_t.test
+
+long_S_y_t.test <- t.test(data = long_S_y, S ~ SampleType, paired=FALSE)
+cat("\nTS t-test - swale Y \n================== \n")
+long_S_y_t.test
+```
+
+### 4.9.4 Scatter plot
+
+```{r}
+p_chem_scatter<- ggscatter(long_all, x="N", y="C", add="reg.line") +
+  stat_cor(label.y=0.6) +
+  stat_regline_equation(label.y=0.4)+
+  geom_point(aes(color=Description4)) +
+  geom_smooth(method="lm", se=TRUE, fullrange=FALSE, level=0.95) + #fit linear model
+#  geom_abline(intercept = 5.7, slope = 1, linetype="dashed", color="black")+
+  scale_color_manual(values=swales_col) +
+   facet_grid(SampleType~Swale)+
+  labs(title = str_c("Scatter plot of TOC and TN")) +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10)) + 
+  theme(axis.text.x = element_text(size = 8, 
+        angle = 0, hjust = 0.5),
+        legend.position = "top", legend.box = "vertical")
+
+p_chem_scatter
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_TOC_TN.pdf", p_chem_scatter,
+       height = 20, width = 20, dpi = 300)
+
+```
+
+
+## 4.10 Grain size data
+### 4.10.1 Make barplot
+Grain size mean phi
+```{r}
+long_summary_grain <- data_summary(long_all, varname="mean_phi",
+                             groupnames=c("Description4", "Swale", "SampleType"))
+head(long_summary_grain)
+
+```
+
+```{r}
+long_summary_grain$Description4 <- factor(long_summary_grain$Description4, level=order_description_rev)
+
+```
+
+
+```{r}
+p_grain<- ggplot(long_summary_grain, aes(x=Description4, y=mean_phi, fill=Description4)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  #geom_errorbar(aes(ymin=C-sd, ymax=C+sd), width=.2, position=position_dodge(.9)) +
+  coord_flip() +
+  facet_wrap(~Swale, scales = "free")+
+  scale_fill_manual(values = swales_col) +
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+p_grain
+```
+
+
+Sorting
+```{r}
+long_summary_sort <- data_summary(long_all, varname="sorting",
+                             groupnames=c("Description4", "Swale", "SampleType"))
+head(long_summary_sort)
+
+```
+
+```{r}
+long_summary_sort$Description4 <- factor(long_summary_sort$Description4, level=order_description_rev)
+
+```
+
+
+```{r}
+p_sort<- ggplot(long_summary_sort, aes(x=Description4, y=sorting, fill=Description4)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  #geom_errorbar(aes(ymin=C-sd, ymax=C+sd), width=.2, position=position_dodge(.9)) +
+  coord_flip() +
+  facet_wrap(~Swale, scales = "free")+
+  scale_fill_manual(values = swales_col) +
+  theme_bw(base_size = 22) +
+    theme(legend.position = "top", legend.box = "vertical",
+          legend.title = element_blank(),
+          legend.text = element_text(size=rel(1))) +
+    theme(axis.text.y = element_text(size = rel(1.5))) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, size = rel(1.5))) + 
+    theme(strip.text.x = element_text(size=rel(1.5)))+
+    guides(col = guide_legend(title.position = "top", ncol = 3, nrow = 4, byrow = TRUE))
+
+p_sort
+```
+
+```{r}
+grid_fig_grain <-  ggarrange(p_grain, p_sort, 
+                            align="hv",
+                            ncol=1, nrow=2,
+                            common.legend = TRUE, 
+                            legend = "top",
+                            font.label = list(size=20))
+
+
+ggsave("../phyloseq_palaeo/fig_swale_2_diff_col_v2/fig_grain_size.pdf", grid_fig_grain,
+       height = 15, width = 20, dpi = 300)
+```
